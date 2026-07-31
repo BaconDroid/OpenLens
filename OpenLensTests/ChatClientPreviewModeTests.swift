@@ -3,6 +3,29 @@ import Testing
 
 struct ChatClientPreviewModeTests {
 
+    @Test func recognizesOnlyTheDedicatedUndoSlashCommand() {
+        #expect(ChatClient.isUndoCommand("/undo"))
+        #expect(ChatClient.isUndoCommand("  /UNDO  "))
+        #expect(!ChatClient.isUndoCommand("/undo this"))
+        #expect(!ChatClient.isUndoCommand("undo"))
+    }
+
+    @Test func revertedTurnAndLaterMessagesAreHidden() {
+        let messages = [
+            ChatMessage(id: "message-1", role: .user, content: "Keep"),
+            ChatMessage(id: "message-2", role: .assistant, content: "Keep too"),
+            ChatMessage(id: "message-3", role: .user, content: "Undo"),
+            ChatMessage(id: "message-4", role: .assistant, content: "Remove")
+        ]
+
+        let visible = ChatClient.messagesBeforeRevert(
+            messages,
+            revert: OCSessionRevert(messageID: "message-3")
+        )
+
+        #expect(visible.map(\.id) == ["message-1", "message-2"])
+    }
+
     @Test func recentSessionModelSelectionUsesLatestMessageWithResolvedModel() {
         let messages = [
             ChatMessage(

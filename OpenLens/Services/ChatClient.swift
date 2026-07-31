@@ -32,6 +32,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
     var inputText: String = ""
     var isLoading: Bool = false
+    /// True while a follow-up is being admitted to the server-side turn queue.
+    var isQueueingPrompt: Bool = false
+    /// True while OpenCode is reverting a selected user message.
+    var isUndoingMessage: Bool = false
     var responseState: ChatResponseState = .idle
     var errorMessage: String?
 
@@ -1096,7 +1100,11 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             let loaded = try await messagesService!.loadMessages(sessionID: session.id)
-            let visibleMessages = mergeLoadedMessagesWithLocallyStoppedMessages(loaded)
+            let mergedMessages = mergeLoadedMessagesWithLocallyStoppedMessages(loaded)
+            let revert = currentSession?.id == session.id
+                ? currentSession?.revert
+                : session.revert
+            let visibleMessages = Self.messagesBeforeRevert(mergedMessages, revert: revert)
             self.messages = visibleMessages
             if Self.recentSessionModelSelection(from: visibleMessages) != nil {
                 syncSessionModelSelection(from: visibleMessages)
@@ -1112,6 +1120,82 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         await refreshCurrentSessionStatus()
         await loadTodos()
+    }
+
+    nonisolated static func messagesBeforeRevert(
+        _ messages: [ChatMessage],
+        revert: OCSessionRevert?
+    ) -> [ChatMessage] {
+        guard let revert else { return messages }
+        if let revertedIndex = messages.firstIndex(where: { $0.id == revert.messageID }) {
+            return Array(messages[..<revertedIndex])
+        }
+        return messages.filter { $0.id < revert.messageID }
+    }
+
+    /// Whether the current transcript can safely undo a persisted user turn.
+    /// OpenCode performs the actual revert, so this is intentionally unavailable
+    /// for locally simulated and read-only chat modes.
+    func canUndo(_ message: ChatMessage) -> Bool {
+        message.role == .user
+            && !isLoading
+            && !isQueueingPrompt
+            && !isUndoingMessage
+            && !isDemoMode
+            && !isRecordedReplayMode
+            && !isOfflinePreviewMode
+            && currentSession != nil
+            && messagesService != nil
+    }
+
+    /// Mirrors the TUI's Undo Message command by asking OpenCode to restore the
+    /// session state from immediately before the selected user message.
+    func undo(_ message: ChatMessage) async {
+        guard canUndo(message), let session = currentSession, let messagesService else { return }
+
+        isUndoingMessage = true
+        defer { isUndoingMessage = false }
+
+        do {
+            let revertedSession = try await messagesService.revertMessage(
+                sessionID: session.id,
+                messageID: message.id
+            )
+            guard currentSession?.id == session.id else { return }
+            currentSession = revertedSession ?? OCSession(
+                id: session.id,
+                projectID: session.projectID,
+                directory: session.directory,
+                parentID: session.parentID,
+                title: session.title,
+                version: session.version,
+                time: session.time,
+                share: session.share,
+                revert: OCSessionRevert(messageID: message.id)
+            )
+            await loadMessages()
+        } catch {
+            guard currentSession?.id == session.id else { return }
+            errorMessage = "Failed to undo message: \(error.localizedDescription)"
+        }
+    }
+
+    /// Invoked by `/undo` in the composer. OpenCode's TUI undo command targets
+    /// the most recent user turn, so the mobile command follows the same rule.
+    func undoLatestMessage() async {
+        guard let message = messages.reversed().first(where: { $0.role == .user }) else {
+            errorMessage = "There is no message to undo."
+            return
+        }
+
+        guard canUndo(message) else {
+            errorMessage = isRecordedReplayMode
+                ? AppText.recordedReplayReadOnly
+                : "Undo is not available right now."
+            return
+        }
+
+        await undo(message)
     }
 
     func refreshCurrentSessionStatus() async {
@@ -1458,7 +1542,15 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isLoading, currentSession != nil else { return }
+        guard !text.isEmpty, !isLoading, !isQueueingPrompt, currentSession != nil else { return }
+
+        if Self.isUndoCommand(text) {
+            inputText = ""
+            Task {
+                await undoLatestMessage()
+            }
+            return
+        }
 
         if isDemoMode {
             beginResponse()
@@ -1501,6 +1593,67 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         Task {
             await sendPromptAsync(text: text)
+        }
+    }
+
+    /// Queues the current composer text after the running session turn. This
+    /// deliberately does not change response state or live activity: the
+    /// current turn remains in control until the server promotes the input.
+    func queuePrompt() {
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.isUndoCommand(text) {
+            errorMessage = "Wait for the active session to finish before undoing."
+            return
+        }
+        guard !text.isEmpty,
+              isLoading,
+              !isStoppingResponse,
+              !isQueueingPrompt,
+              pendingQuestion == nil,
+              canCompose,
+              currentSession != nil else {
+            return
+        }
+
+        if isDemoMode {
+            messages.append(ChatMessage(role: .user, content: text))
+            inputText = ""
+            contentVersion &+= 1
+            scrollAnchor &+= 1
+            return
+        }
+
+        if isRecordedReplayMode {
+            errorMessage = AppText.recordedReplayReadOnly
+            return
+        }
+
+        guard let session = currentSession,
+              let messagesService else {
+            errorMessage = "Not connected."
+            return
+        }
+
+        inputText = ""
+        isQueueingPrompt = true
+
+        Task {
+            defer {
+                if currentSession?.id == session.id {
+                    isQueueingPrompt = false
+                }
+            }
+
+            do {
+                try await messagesService.queuePrompt(sessionID: session.id, text: text)
+                guard currentSession?.id == session.id else { return }
+                messages.append(ChatMessage(role: .user, content: text))
+                contentVersion &+= 1
+                scrollAnchor &+= 1
+            } catch {
+                guard currentSession?.id == session.id else { return }
+                errorMessage = "Failed to queue: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -1599,6 +1752,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     private enum SlashAction {
         case command(command: String, arguments: String)
         case agent(agent: String, prompt: String)
+    }
+
+    static func isUndoCommand(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/undo"
     }
 
     private func parseSlashAction(_ text: String) -> SlashAction? {
@@ -2582,6 +2739,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         isRecordingStream = false
         connection?.sseClient?.setRawEventRetentionEnabled(false)
         isLoading = false
+        isQueueingPrompt = false
         responseState = .idle
         stopFlushTimer()
         cancelTimelineInvalidation()

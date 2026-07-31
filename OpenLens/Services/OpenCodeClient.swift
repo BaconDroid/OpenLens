@@ -108,6 +108,17 @@ actor OpenCodeClient {
         let _: EmptyResponse = try await postCodable("/session/\(sessionID)/prompt_async", body: input, expect204: true)
     }
 
+    /// Admit a prompt behind the active session turn without interrupting it.
+    /// The scheduler responds with admission metadata. The chat only needs the
+    /// successful admission signal, so its response body is intentionally ignored.
+    func queuePrompt(sessionID: String, text: String) async throws {
+        let input = OCQueuedPromptInput(
+            prompt: .init(text: text),
+            delivery: .queue
+        )
+        try await postDiscardingResponse("/api/session/\(sessionID)/prompt", body: input)
+    }
+
     /// Send a prompt synchronously (blocks until response is complete).
     func sendPrompt(
         sessionID: String,
@@ -285,10 +296,13 @@ actor OpenCodeClient {
         try await post("/session/\(id)/share", body: [:] as [String: String])
     }
 
-    func revertMessage(sessionID: String, messageID: String, partID: String? = nil) async throws -> Bool {
+    /// Reverts a message and returns the updated session when the server includes
+    /// it. Older OpenCode versions returned a boolean acknowledgement, which is
+    /// also accepted for compatibility.
+    func revertMessage(sessionID: String, messageID: String, partID: String? = nil) async throws -> OCSession? {
         var body: [String: Any] = ["messageID": messageID]
         if let partID { body["partID"] = partID }
-        return try await post("/session/\(sessionID)/revert", body: body)
+        return try await postOptionallyDecoding("/session/\(sessionID)/revert", body: body)
     }
 
     // MARK: - Private HTTP helpers
@@ -310,6 +324,18 @@ actor OpenCodeClient {
         return try decode(data)
     }
 
+    /// Validates a successful action response while tolerating older response
+    /// shapes. Used when the current API returns useful state but earlier server
+    /// versions returned only an acknowledgement.
+    private func postOptionallyDecoding<T: Decodable>(_ path: String, body: Any) async throws -> T? {
+        var request = makeRequest(path: path, method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await transport.data(for: request)
+        try validateResponse(response)
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
     private func postCodable<T: Decodable, B: Encodable>(_ path: String, body: B, expect204: Bool = false) async throws -> T {
         var request = makeRequest(path: path, method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -323,6 +349,14 @@ actor OpenCodeClient {
             return result
         }
         return try decode(data)
+    }
+
+    private func postDiscardingResponse<B: Encodable>(_ path: String, body: B) async throws {
+        var request = makeRequest(path: path, method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        let (_, response) = try await transport.data(for: request)
+        try validateResponse(response)
     }
 
     private func patch<T: Decodable>(_ path: String, body: Any) async throws -> T {

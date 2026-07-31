@@ -51,7 +51,6 @@ struct ConnectedRootView: View {
                 selection: $permissionSheetDetent
             )
             .presentationBackground(Color.appBackground)
-            .presentationCornerRadius(32)
             .presentationContentInteraction(.resizes)
             .presentationDragIndicator(.visible)
             .interactiveDismissDisabled()

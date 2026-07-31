@@ -13,6 +13,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
     let version: String?
     let time: OCSessionTime
     let share: OCShareInfo?
+    let revert: OCSessionRevert?
 
     /// Convenience: Unix timestamp (seconds) when last updated. Used for sorting.
     var updatedAt: Double { time.updated / 1000.0 }
@@ -20,7 +21,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
     var createdAt: Double { time.created / 1000.0 }
 
     enum CodingKeys: String, CodingKey {
-        case id, projectID, directory, parentID, title, version, time, share
+        case id, projectID, directory, parentID, title, version, time, share, revert
     }
 
     init(
@@ -31,7 +32,8 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         title: String,
         version: String? = nil,
         time: OCSessionTime,
-        share: OCShareInfo? = nil
+        share: OCShareInfo? = nil,
+        revert: OCSessionRevert? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -41,6 +43,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         self.version = version
         self.time = time
         self.share = share
+        self.revert = revert
     }
 
     init(from decoder: Decoder) throws {
@@ -53,6 +56,7 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
         version = try container.decodeIfPresent(String.self, forKey: .version)
         time = try container.decodeIfPresent(OCSessionTime.self, forKey: .time) ?? OCSessionTime(created: 0, updated: 0)
         share = try container.decodeIfPresent(OCShareInfo.self, forKey: .share)
+        revert = try container.decodeIfPresent(OCSessionRevert.self, forKey: .revert)
     }
 
     func hash(into hasher: inout Hasher) {
@@ -60,7 +64,20 @@ nonisolated struct OCSession: Codable, Identifiable, Hashable, Sendable {
     }
 
     static func == (lhs: OCSession, rhs: OCSession) -> Bool {
-        lhs.id == rhs.id && lhs.title == rhs.title && lhs.time.updated == rhs.time.updated
+        lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.time.updated == rhs.time.updated
+            && lhs.revert == rhs.revert
+    }
+}
+
+nonisolated struct OCSessionRevert: Codable, Hashable, Sendable {
+    let messageID: String
+    let partID: String?
+
+    init(messageID: String, partID: String? = nil) {
+        self.messageID = messageID
+        self.partID = partID
     }
 }
 
@@ -1651,6 +1668,22 @@ struct OCFileContent: Codable, Hashable, Sendable {
  struct OCPromptPart: Codable {
     let type: String // "text"
     let text: String?
+}
+
+/// Prompt input for the session scheduler API. Unlike the streaming prompt
+/// endpoint, this API immediately admits input to the active session and can
+/// queue it behind a running turn.
+nonisolated struct OCQueuedPromptInput: Codable, Sendable {
+    let prompt: Prompt
+    let delivery: Delivery
+
+    nonisolated struct Prompt: Codable, Sendable {
+        let text: String
+    }
+
+    nonisolated enum Delivery: String, Codable, Sendable {
+        case queue
+    }
 }
 
 // MARK: - Todo

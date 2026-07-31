@@ -32,6 +32,14 @@ struct ChatView: View {
     @State private var displayedResponseState: ChatResponseState = .idle
     @State private var isComposerExpanded = false
 
+    private static let undoSlashAction = WorkspaceSlashActionItem(
+        kind: .command,
+        token: "undo",
+        title: "Undo last message",
+        description: "Revert the latest user message and its later work.",
+        prompt: "/undo"
+    )
+
     var body: some View {
         VStack(spacing: 0) {
             ChatMessagesListView(
@@ -606,7 +614,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var composerActionButtonLabel: some View {
-        if chatClient.isLoading {
+        if chatClient.isLoading && !hasComposerText {
             ZStack {
                 Circle()
                     .fill(isRetroChat ? RetroChatStyle.danger : Color.red)
@@ -625,7 +633,7 @@ struct ChatView: View {
             .contentShape(Circle())
             .transition(.scale(scale: 0.7).combined(with: .opacity))
         } else {
-            Image(systemName: "arrow.up.circle.fill")
+            Image(systemName: chatClient.isLoading ? "arrow.uturn.up.circle.fill" : "arrow.up.circle.fill")
                 .font(.system(size: isRetroChat ? 28 : 30, weight: isRetroChat ? .bold : .regular))
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(
@@ -639,7 +647,11 @@ struct ChatView: View {
     }
 
     private var isComposerActionDisabled: Bool {
-        chatClient.isLoading ? chatClient.isStoppingResponse : !canSend
+        if hasComposerText {
+            return chatClient.isLoading ? !canQueuePrompt : !canSend
+        }
+
+        return chatClient.isLoading ? chatClient.isStoppingResponse : true
     }
 
     private var composerActionAccessibilityLabel: String {
@@ -647,22 +659,28 @@ struct ChatView: View {
             return AppText.responseStopping
         }
 
-        return chatClient.isLoading ? "Stop" : "Send"
+        if chatClient.isLoading {
+            return hasComposerText ? "Queue prompt" : "Stop"
+        }
+
+        return "Send"
     }
 
     private func performComposerAction() {
-        collapseComposerFocus()
-
-        if chatClient.isLoading {
+        if chatClient.isLoading && hasComposerText {
+            sendComposerInput()
+        } else if chatClient.isLoading {
+            collapseComposerFocus()
             chatClient.abort()
         } else {
+            collapseComposerFocus()
             sendComposerInput()
         }
     }
 
     private func sendComposerInput() {
         guard let selectedSlashAction else {
-            chatClient.send()
+            sendCurrentComposerInput()
             return
         }
 
@@ -671,7 +689,15 @@ struct ChatView: View {
 
         chatClient.inputText = composedText
         self.selectedSlashAction = nil
-        chatClient.send()
+        sendCurrentComposerInput()
+    }
+
+    private func sendCurrentComposerInput() {
+        if chatClient.isLoading {
+            chatClient.queuePrompt()
+        } else {
+            chatClient.send()
+        }
     }
 
     private func composedSlashActionText(for action: WorkspaceSlashActionItem) -> String {
@@ -837,11 +863,26 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !composerSendText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        hasComposerText &&
             !chatClient.isLoading &&
+            !chatClient.isQueueingPrompt &&
             chatClient.currentSession != nil &&
             chatClient.pendingQuestion == nil &&
             chatClient.canCompose
+    }
+
+    private var canQueuePrompt: Bool {
+        hasComposerText &&
+            chatClient.isLoading &&
+            !chatClient.isStoppingResponse &&
+            !chatClient.isQueueingPrompt &&
+            chatClient.currentSession != nil &&
+            chatClient.pendingQuestion == nil &&
+            chatClient.canCompose
+    }
+
+    private var hasComposerText: Bool {
+        !composerSendText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var composerSendText: String {
@@ -887,7 +928,8 @@ struct ChatView: View {
         guard !isLoadingCommands else { return }
 
         isLoadingCommands = true
-        let slashActions = await workspaceService.loadSlashActions()
+        let workspaceSlashActions = await workspaceService.loadSlashActions()
+        let slashActions = [Self.undoSlashAction] + workspaceSlashActions
         availableSlashActions = slashActions
         chatClient.updateSlashCatalog(
             commands: slashActions.filter { $0.kind == .command }.map(\.token),
@@ -937,6 +979,8 @@ struct ChatView: View {
         }
 
         switch action.token.lowercased() {
+        case "undo":
+            return "arrow.uturn.backward"
         case let id where id.contains("review"):
             return "ladybug"
         case let id where id.contains("status"):
@@ -949,11 +993,10 @@ struct ChatView: View {
             return "command"
         }
     }
-
 }
 
 struct PermissionRequestSheet: View {
-    static let defaultPresentationDetent: PresentationDetent = .height(390)
+    static let defaultPresentationDetent: PresentationDetent = .fraction(0.5)
 
     let permission: OCPermissionRequest
     @Binding var selectedDetent: PresentationDetent
@@ -1104,23 +1147,15 @@ struct PermissionRequestSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SurfaceCard(padding: 0, cornerRadius: 24) {
-                VStack(alignment: .leading, spacing: 18) {
-                    if confirmsAllowAll && canOfferAllowAll {
-                        allowAllConfirmation
-                    } else {
-                        permissionRequest
-                    }
-                }
-                .padding(20)
-                .animation(.snappy(duration: 0.2), value: confirmsAllowAll)
+        VStack(alignment: .leading, spacing: 16) {
+            if confirmsAllowAll && canOfferAllowAll {
+                allowAllConfirmation
+            } else {
+                permissionRequest
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 8)
-        .padding(.bottom, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding()
+        .animation(.snappy(duration: 0.2), value: confirmsAllowAll)
         .background(Color.appBackground)
         .onAppear {
             if initiallyConfirmsAllowAll && canOfferAllowAll {
@@ -1138,10 +1173,10 @@ struct PermissionRequestSheet: View {
                     .font(.system(size: 14))
                     .foregroundStyle(Color.appSecondary)
                     .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             metadata
+            Spacer()
             actions
         }
     }
@@ -1448,6 +1483,63 @@ struct PermissionRequestSheet: View {
 
         guard hiddenCount > 0 else { return visiblePrefix }
         return "\(visiblePrefix) +\(hiddenCount)"
+    }
+}
+
+#Preview("Permission request") {
+    PermissionRequestSheetPreviewHost()
+}
+
+#Preview("Always allow confirmation") {
+    PermissionRequestSheetPreviewHost(initiallyConfirmsAllowAll: true)
+}
+
+private struct PermissionRequestSheetPreviewHost: View {
+    @State private var isPresented = true
+    @State private var chatClient = ChatClient(demoMode: true)
+    @State private var connection = ConnectionManager()
+    @State private var selectedDetent = PermissionRequestSheet.defaultPresentationDetent
+
+    private let initiallyConfirmsAllowAll: Bool
+
+    private let permission = OCPermissionRequest(
+        id: "preview-permission",
+        permission: "bash",
+        patterns: ["git push origin feature/app-store-assets"],
+        always: ["*"],
+        description: "Push the screenshot branch to origin.",
+        title: "Permission required",
+        toolName: "bash"
+    )
+
+    init(initiallyConfirmsAllowAll: Bool = false) {
+        self.initiallyConfirmsAllowAll = initiallyConfirmsAllowAll
+    }
+
+    var body: some View {
+        NavigationStack {
+            ChatView(chatClient: chatClient)
+        }
+        .environment(\.connection, connection)
+        .task {
+            connection.configureDemoState(projectName: "OpenLens", branch: "feature/permissions")
+        }
+        .sheet(isPresented: $isPresented) {
+            PermissionRequestSheet(
+                permission: permission,
+                selectedDetent: $selectedDetent,
+                initiallyConfirmsAllowAll: initiallyConfirmsAllowAll,
+                onRespond: { _ in false }
+            )
+            .presentationDetents(
+                PermissionRequestSheet.presentationDetents(for: permission),
+                selection: $selectedDetent
+            )
+            .presentationBackground(Color.appBackground)
+            .presentationContentInteraction(.resizes)
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
     }
 }
 
@@ -2387,8 +2479,8 @@ enum ChatScrollPolicy {
         guard isLoading,
               followLatest,
               interaction.allowsProgrammaticScroll,
-              (bottomDistance > settledBottomTolerance
-                || bottomOverscroll > settledBottomTolerance),
+              bottomDistance > settledBottomTolerance
+              || bottomOverscroll > settledBottomTolerance,
               contentVersion != lastHandledContentVersion else { return false }
         return now.timeIntervalSince(lastAutoScrollDate) >= minimumInterval
     }

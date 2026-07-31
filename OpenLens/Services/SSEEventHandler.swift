@@ -635,7 +635,8 @@ final class SSEEventHandler {
             title: includes("title") ? update.title : currentSession.title,
             version: includes("version") ? update.version : currentSession.version,
             time: includes("time") ? update.time : currentSession.time,
-            share: includes("share") ? update.share : currentSession.share
+            share: includes("share") ? update.share : currentSession.share,
+            revert: includes("revert") ? update.revert : currentSession.revert
         )
     }
 

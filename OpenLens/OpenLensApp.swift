@@ -444,29 +444,29 @@ struct OpenLensApp: App {
             .task(id: connection.state) {
                 await prepareInitialSessions(for: connection.state)
             }
-//            .sheet(isPresented: previewPresentationBinding) {
-//                if let previewClient = previewChatClient, let previewConn = previewConnection {
-//                    NavigationStack {
-//                        ChatView(chatClient: previewClient)
-//                            .environment(\.connection, previewConn)
-//                            .toolbar {
-//                                ToolbarItem(placement: .topBarLeading) {
-//                                    Button {
-//                                        exitPreview()
-//                                    } label: {
-//                                        Image(systemName: "xmark")
-//                                    }
-//                                }
-//                            }
-//                    }
-//                    .interactiveDismissDisabled(true)
-//                    .onChange(of: previewConn.state) { _, newState in
-//                        if case .disconnected = newState {
-//                            exitPreview()
-//                        }
-//                    }
-//                }
-//            }
+            .sheet(isPresented: previewPresentationBinding) {
+                if let previewClient = previewChatClient, let previewConn = previewConnection {
+                    NavigationStack {
+                        ChatView(chatClient: previewClient)
+                            .environment(\.connection, previewConn)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button {
+                                        exitPreview()
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                }
+                            }
+                    }
+                    .interactiveDismissDisabled(true)
+                    .onChange(of: previewConn.state) { _, newState in
+                        if case .disconnected = newState {
+                            exitPreview()
+                        }
+                    }
+                }
+            }
 //            .sheet(isPresented: $showReviewPrePrompt) {
 //                ReviewRequestSheet(
 //                    onReview: {

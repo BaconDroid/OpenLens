@@ -130,6 +130,30 @@ struct OpenLensAppConnectionStateTests {
         ))
     }
 
+    @Test func autoReconnectFailureShowsTheUnderlyingConnectionError() {
+        #expect(connectionFailureMessage(
+            localNetworkAccessRequired: false,
+            connectionError: "HTTP error 401.",
+            isAutoReconnect: true
+        ) == "HTTP error 401.")
+    }
+
+    @Test func autoReconnectFailureUsesGenericCopyWhenNoErrorIsAvailable() {
+        #expect(connectionFailureMessage(
+            localNetworkAccessRequired: false,
+            connectionError: nil,
+            isAutoReconnect: true
+        ) == AppText.autoReconnectErrorBody)
+    }
+
+    @Test func localNetworkFailureTakesPriorityOverTheTransportError() {
+        #expect(connectionFailureMessage(
+            localNetworkAccessRequired: true,
+            connectionError: "The request timed out.",
+            isAutoReconnect: true
+        ) == AppText.localNetworkAccessRequiredBody)
+    }
+
     @Test @MainActor func localNetworkProbeStopsConnectionBeforeHTTPWhenAccessIsRequired() async {
         let probe = LocalNetworkAccessProbeStub(result: .accessRequired)
         let connection = ConnectionManager(localNetworkAccessProbe: probe)

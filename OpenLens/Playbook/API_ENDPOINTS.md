@@ -21,7 +21,7 @@ Authentication uses HTTP Basic Auth via the `Authorization` header when a passwo
 | GET | `/session/status` | — | `[String: OCSessionStatus]` | Status of all sessions (idle/busy/retry) |
 | POST | `/session/:id/abort` | `{}` | `Bool` | Abort the running agent in a session |
 | POST | `/session/:id/share` | `{}` | `OCSession` | Generate a share link for a session |
-| POST | `/session/:id/revert` | `{ messageID, partID? }` | `Bool` | Revert changes from a specific message |
+| POST | `/session/:id/revert` | `{ messageID, partID? }` | `Session` (legacy: `Bool`) | Revert changes from a specific message |
 
 ## Messages
 

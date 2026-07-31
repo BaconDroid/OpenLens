@@ -1372,6 +1372,7 @@ private struct MessageCopyActions: ViewModifier {
                     } label: {
                         Label(AppText.copyMessage, systemImage: "doc.on.doc")
                     }
+
                 }
         } else {
             content
