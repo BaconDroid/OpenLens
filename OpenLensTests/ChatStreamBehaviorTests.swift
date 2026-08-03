@@ -4495,5 +4495,7 @@ private final class TestLiveActivityProvider: LiveActivityProviding {
 
     func endActivity(completionSummary: String?) {}
 
+    func dismissImmediately() {}
+
     func previewLiveActivity() {}
 }

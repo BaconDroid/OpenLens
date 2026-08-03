@@ -534,11 +534,14 @@ struct ChatView: View {
                         selectedSlashActionChip(selectedSlashAction)
                     }
 
-                    TextField(composerPlaceholder, text: $chatClient.inputText, axis: .vertical)
-                        .focused($isInputFocused)
-                        .onTapGesture {
-                            setComposerExpanded(true)
-                        }
+                     TextField(composerPlaceholder, text: $chatClient.inputText, axis: .vertical)
+                         .focused($isInputFocused)
+                         .onSubmit {
+                             performComposerAction()
+                         }
+                         .onTapGesture {
+                             setComposerExpanded(true)
+                         }
                         .lineLimit(1 ... 5)
                         .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
                         .foregroundStyle(primaryTextColor)

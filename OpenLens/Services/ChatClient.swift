@@ -3020,5 +3020,7 @@ private final class NoopLiveActivityProvider: LiveActivityProviding {
 
     func endActivity(completionSummary: String?) {}
 
+    func dismissImmediately() {}
+
     func previewLiveActivity() {}
 }
