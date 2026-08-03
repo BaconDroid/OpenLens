@@ -545,6 +545,7 @@ struct OpenLensApp: App {
             ) {
                 Button(AppText.switchAction, role: .destructive) {
                     if isPreviewMode { exitPreview() }
+                    liveActivity.dismissImmediately()
                     connection.disconnect()
                     // pendingDeepLink is already set — ConnectView will pick it up
                 }

@@ -81,6 +81,7 @@ struct SettingsView: View {
                         isPresented: $showDisconnectConfirmation
                     ) {
                         Button(AppText.disconnect, role: .destructive) {
+                            liveActivity.dismissImmediately()
                             connection.manualDisconnect()
                         }
                         Button(AppText.done, role: .cancel) {}

@@ -128,6 +128,18 @@ final class LiveActivityManager: LiveActivityProviding {
 
     /// End the Live Activity. Shows a brief "Done" state before dismissing.
     func endActivity(completionSummary: String? = nil) {
+        finishActivity(completionSummary: completionSummary, dismissalPolicy: .after(.now + 8))
+    }
+
+    /// Dismiss the Live Activity immediately when its server context is gone.
+    func dismissImmediately() {
+        finishActivity(completionSummary: nil, dismissalPolicy: .immediate)
+    }
+
+    private func finishActivity(
+        completionSummary: String?,
+        dismissalPolicy: ActivityUIDismissalPolicy
+    ) {
         previewTask?.cancel()
         previewTask = nil
 
@@ -152,7 +164,7 @@ final class LiveActivityManager: LiveActivityProviding {
         let content = ActivityContent(state: finalState, staleDate: nil)
 
         Task {
-            await activity.end(content, dismissalPolicy: .after(.now + 8))
+            await activity.end(content, dismissalPolicy: dismissalPolicy)
         }
     }
 
