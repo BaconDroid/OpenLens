@@ -563,6 +563,7 @@ struct ChatView: View {
         } label: {
             composerActionButtonLabel
                 .animation(.spring(duration: 0.25), value: chatClient.isLoading)
+                .animation(.spring(duration: 0.25), value: chatClient.isQueueingPrompt)
         }
         .disabled(isComposerActionDisabled)
         .accessibilityLabel(composerActionAccessibilityLabel)
@@ -614,7 +615,19 @@ struct ChatView: View {
 
     @ViewBuilder
     private var composerActionButtonLabel: some View {
-        if chatClient.isLoading && !hasComposerText {
+        if chatClient.isQueueingPrompt {
+            ZStack {
+                Circle()
+                    .fill(isRetroChat ? RetroChatStyle.ink : Color.appAccent)
+
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(isRetroChat ? RetroChatStyle.paper : Color.appOnAccent)
+            }
+            .frame(width: 32, height: 32)
+            .contentShape(Circle())
+            .transition(.scale(scale: 0.7).combined(with: .opacity))
+        } else if chatClient.isLoading && !hasComposerText {
             ZStack {
                 Circle()
                     .fill(isRetroChat ? RetroChatStyle.danger : Color.red)
@@ -647,6 +660,10 @@ struct ChatView: View {
     }
 
     private var isComposerActionDisabled: Bool {
+        if chatClient.isQueueingPrompt {
+            return true
+        }
+
         if hasComposerText {
             return chatClient.isLoading ? !canQueuePrompt : !canSend
         }
@@ -655,12 +672,16 @@ struct ChatView: View {
     }
 
     private var composerActionAccessibilityLabel: String {
+        if chatClient.isQueueingPrompt {
+            return AppText.queuePromptSubmitting
+        }
+
         if chatClient.isStoppingResponse {
             return AppText.responseStopping
         }
 
         if chatClient.isLoading {
-            return hasComposerText ? "Queue prompt" : "Stop"
+            return hasComposerText ? AppText.queuePrompt : "Stop"
         }
 
         return "Send"
@@ -1997,8 +2018,17 @@ private struct ChatMessagesListView: View {
                         ForEach(timelineItems) { item in
                             timelineRow(item)
                         }
+
+                        ForEach(Array(chatClient.queuedPrompts.enumerated()), id: \.element.id) { index, prompt in
+                            QueuedPromptBubbleView(
+                                prompt: prompt,
+                                position: index + 1
+                            )
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
                     }
                     .padding(.horizontal, isRetroChat ? 12 : 16)
+                    .animation(.easeOut(duration: 0.22), value: chatClient.queuedPrompts)
 
                     Color.clear
                         .frame(height: 17)
@@ -2268,6 +2298,87 @@ private struct ChatMessagesListView: View {
             followLatest: followLatest,
             isPastVisibilityThreshold: scrollState.isPastVisibilityThreshold
         )
+    }
+}
+
+private struct QueuedPromptBubbleView: View {
+    let prompt: QueuedPrompt
+    let position: Int
+
+    @Environment(\.openLensTheme) private var theme
+    @Environment(\.chatEasterEgg) private var chatEasterEgg
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: isRetroChat ? 6 : 8) {
+            Spacer(minLength: isRetroChat ? 42 : 64)
+
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(prompt.text)
+                    .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
+                    .padding(.horizontal, isRetroChat ? 14 : 16)
+                    .padding(.vertical, isRetroChat ? 10 : 11)
+                    .background {
+                        RoundedRectangle(cornerRadius: isRetroChat ? 7 : theme.radius.card, style: .continuous)
+                            .fill(isRetroChat ? RetroChatStyle.paperWarm : Color.appAccent.opacity(0.10))
+                            .shadow(
+                                color: isRetroChat ? RetroChatStyle.shadow : .clear,
+                                radius: 0,
+                                x: isRetroChat ? 3 : 0,
+                                y: isRetroChat ? 3 : 0
+                            )
+                    }
+                    .overlay {
+                        if isRetroChat {
+                            RetroChatDoubleBorder(cornerRadius: 7)
+                        } else {
+                            RoundedRectangle(cornerRadius: theme.radius.card, style: .continuous)
+                                .strokeBorder(
+                                    Color.appAccent.opacity(0.48),
+                                    style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                                )
+                        }
+                    }
+
+                HStack(spacing: 5) {
+                    statusIcon
+                    Text(statusText)
+                }
+                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(isRetroChat ? RetroChatStyle.magentaAccent : Color.appAccent)
+                .padding(.trailing, 4)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(statusText). \(prompt.text)")
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch prompt.state {
+        case .submitting:
+            ProgressView()
+                .controlSize(.mini)
+                .tint(isRetroChat ? RetroChatStyle.magentaAccent : Color.appAccent)
+        case .queued:
+            Image(systemName: "clock.fill")
+                .font(.system(size: 10, weight: .semibold))
+        }
+    }
+
+    private var statusText: String {
+        switch prompt.state {
+        case .submitting:
+            AppText.queuePromptSubmitting
+        case .queued where position == 1:
+            "\(AppText.queuePromptQueued) · \(AppText.queuePromptRunsNext)"
+        case .queued:
+            "\(AppText.queuePromptQueued) · \(AppText.queuePromptPosition(position))"
+        }
+    }
+
+    private var isRetroChat: Bool {
+        chatEasterEgg.visualMode.isRetro
     }
 }
 

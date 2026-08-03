@@ -4,36 +4,50 @@ func shouldHideConnectedRootTabBar(selectedTab: AppTab, chatPath: [RouterDestina
     selectedTab == .chat && !chatPath.isEmpty
 }
 
+func shouldUseConnectedRootSidebarLayout(horizontalSizeClass: UserInterfaceSizeClass?) -> Bool {
+    horizontalSizeClass == .regular
+}
+
 struct ConnectedRootView: View {
     @Bindable var chatClient: ChatClient
     let initialSessions: SessionsListView.InitialState
 
     @Environment(AppRouter.self) private var router
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var permissionSheetDetent = PermissionRequestSheet.defaultPresentationDetent
 
     var body: some View {
         @Bindable var router = router
 
-        TabView(selection: $router.selectedTab) {
-            Tab(value: AppTab.chat) {
-                tabNavigationView(for: .chat)
-            } label: {
-                tabLabel(for: .chat, selectedTab: router.selectedTab)
-            }
-            Tab(value: AppTab.review) {
-                tabNavigationView(for: .review)
-            } label: {
-                tabLabel(for: .review, selectedTab: router.selectedTab)
-            }
-            Tab(value: AppTab.workspace) {
-                tabNavigationView(for: .workspace)
-            } label: {
-                tabLabel(for: .workspace, selectedTab: router.selectedTab)
-            }
-            Tab(value: AppTab.settings, role: .search) {
-                tabNavigationView(for: .settings)
-            } label: {
-                tabLabel(for: .settings, selectedTab: router.selectedTab)
+        Group {
+            if shouldUseConnectedRootSidebarLayout(horizontalSizeClass: horizontalSizeClass) {
+                ConnectedSidebarLayout(
+                    chatClient: chatClient,
+                    initialSessions: initialSessions
+                )
+            } else {
+                TabView(selection: $router.selectedTab) {
+                    Tab(value: AppTab.chat) {
+                        tabNavigationView(for: .chat)
+                    } label: {
+                        tabLabel(for: .chat, selectedTab: router.selectedTab)
+                    }
+                    Tab(value: AppTab.review) {
+                        tabNavigationView(for: .review)
+                    } label: {
+                        tabLabel(for: .review, selectedTab: router.selectedTab)
+                    }
+                    Tab(value: AppTab.workspace) {
+                        tabNavigationView(for: .workspace)
+                    } label: {
+                        tabLabel(for: .workspace, selectedTab: router.selectedTab)
+                    }
+                    Tab(value: AppTab.settings, role: .search) {
+                        tabNavigationView(for: .settings)
+                    } label: {
+                        tabLabel(for: .settings, selectedTab: router.selectedTab)
+                    }
+                }
             }
         }
         .tint(Color.appPrimary)
@@ -104,7 +118,7 @@ struct ConnectedRootView: View {
         NavigationStack(path: pathBinding(for: tab)) {
             tabRootView(for: tab)
                 .navigationDestination(for: RouterDestination.self) { destination in
-                    destinationView(for: destination)
+                    ConnectedDestinationView(chatClient: chatClient, destination: destination)
                 }
         }
         // Keep this on the tab NavigationStack so TabView reliably hides the bar when Chat pushes a session.
@@ -122,9 +136,11 @@ struct ConnectedRootView: View {
     private func tabRootView(for tab: AppTab) -> some View {
         switch tab {
         case .chat:
-            SessionsListView(initialState: initialSessions) { session in
-                router.navigate(to: .chatSession(session: session), in: .chat)
-            }
+            SessionsListView(
+                initialState: initialSessions,
+                onSelect: selectChatSession,
+                onDelete: handleDeletedSession
+            )
         case .review:
             ReviewRootView(chatClient: chatClient)
         case .workspace:
@@ -134,8 +150,167 @@ struct ConnectedRootView: View {
         }
     }
 
+    private func selectChatSession(_ session: OCSession) {
+        router.selectChatSession(session)
+    }
+
+    private func handleDeletedSession(_ session: OCSession) {
+        router.clearChatSession(ifMatching: session.id)
+        chatClient.unloadSession(ifMatching: session.id)
+    }
+}
+
+private struct ConnectedSidebarLayout: View {
+    @Bindable var chatClient: ChatClient
+    let initialSessions: SessionsListView.InitialState
+
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: 320)
+
+            Rectangle()
+                .fill(Color.appSeparator)
+                .frame(width: 1)
+                .ignoresSafeArea()
+
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background {
+            Color.appBackground
+                .ignoresSafeArea()
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            ConnectedSidebarNavigation(
+                selectedTab: router.selectedTab,
+                onSelect: { router.selectedTab = $0 }
+            )
+
+            Rectangle()
+                .fill(Color.appSeparator)
+                .frame(height: 1)
+                .padding(.horizontal, 12)
+
+            SessionsListView(
+                initialState: initialSessions,
+                presentationStyle: .sidebar,
+                selectedSessionID: router.selectedChatSessionID,
+                onSelect: selectChatSession,
+                onDelete: handleDeletedSession
+            )
+        }
+        .background {
+            Color.appSurface
+                .ignoresSafeArea()
+        }
+    }
+
     @ViewBuilder
-    private func destinationView(for destination: RouterDestination) -> some View {
+    private var detail: some View {
+        switch router.selectedTab {
+        case .chat:
+            sidebarNavigationStack(for: .chat) {
+                ChatDetailPlaceholderView()
+            }
+        case .review:
+            sidebarNavigationStack(for: .review) {
+                ReviewRootView(chatClient: chatClient)
+            }
+        case .workspace:
+            sidebarNavigationStack(for: .workspace) {
+                WorkspaceRootView(chatClient: chatClient)
+            }
+        case .settings:
+            sidebarNavigationStack(for: .settings) {
+                SettingsView()
+            }
+        }
+    }
+
+    private func sidebarNavigationStack<Root: View>(
+        for tab: AppTab,
+        @ViewBuilder root: () -> Root
+    ) -> some View {
+        NavigationStack(path: pathBinding(for: tab)) {
+            root()
+                .navigationDestination(for: RouterDestination.self) { destination in
+                    ConnectedDestinationView(chatClient: chatClient, destination: destination)
+                }
+        }
+    }
+
+    private func pathBinding(for tab: AppTab) -> Binding<[RouterDestination]> {
+        Binding(
+            get: { router.path(for: tab) },
+            set: { router.setPath($0, for: tab) }
+        )
+    }
+
+    private func selectChatSession(_ session: OCSession) {
+        router.selectChatSession(session)
+    }
+
+    private func handleDeletedSession(_ session: OCSession) {
+        router.clearChatSession(ifMatching: session.id)
+        chatClient.unloadSession(ifMatching: session.id)
+    }
+}
+
+private struct ConnectedSidebarNavigation: View {
+    let selectedTab: AppTab
+    let onSelect: (AppTab) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("OpenLens", systemImage: "circle.hexagongrid.fill")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.appPrimary)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+
+            ForEach(AppTab.allCases) { tab in
+                Button {
+                    onSelect(tab)
+                } label: {
+                    Label(sidebarTitle(for: tab), systemImage: tab.icon)
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.appPrimary)
+                        .symbolVariant(selectedTab == tab ? .fill : .none)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .frame(height: 42)
+                        .background(
+                            selectedTab == tab ? Color.appTertiary : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+    }
+
+    private func sidebarTitle(for tab: AppTab) -> String {
+        tab == .chat ? "Chat" : tab.title
+    }
+}
+
+private struct ConnectedDestinationView: View {
+    @Bindable var chatClient: ChatClient
+    let destination: RouterDestination
+
+    @ViewBuilder
+    var body: some View {
         switch destination {
         case .chatSession(let session):
             SessionChatDestinationView(chatClient: chatClient, session: session)
@@ -154,12 +329,53 @@ private struct SessionChatDestinationView: View {
     @State private var isReady = false
 
     var body: some View {
-        ChatView(chatClient: chatClient)
-            .task(id: session.id) {
-                if chatClient.currentSession?.id != session.id {
-                    await chatClient.loadSession(session)
-                }
-                isReady = true
+        Group {
+            if isReady {
+                ChatView(chatClient: chatClient)
+                    .id(session.id)
+            } else {
+                ProgressView()
+                    .tint(Color.appSecondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .background(Color.appBackground)
+        .toolbar(.visible, for: .navigationBar)
+        .task(id: session.id) {
+            isReady = false
+            if chatClient.currentSession?.id != session.id {
+                await chatClient.loadSession(session)
+            }
+            guard !Task.isCancelled, chatClient.currentSession?.id == session.id else { return }
+            isReady = true
+        }
+    }
+}
+
+private struct ChatDetailPlaceholderView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 32, weight: .light))
+                .foregroundStyle(Color.appSecondary)
+                .frame(width: 72, height: 72)
+                .background(Color.appTertiary, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+            VStack(spacing: 6) {
+                Text(AppText.selectSessionTitle)
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.appPrimary)
+
+                Text(AppText.selectSessionSubtitle)
+                    .font(.system(size: 14, design: .rounded))
+                    .foregroundStyle(Color.appSecondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.appBackground)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
     }
 }

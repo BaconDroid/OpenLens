@@ -175,6 +175,7 @@ func shouldHandleConnectionAsFreshConnect(
 @main
 struct OpenLensApp: App {
     private static let streamStressLaunchArgument = "CHAT_STREAM_STRESS_MODE"
+    private static let queuedPromptPreviewLaunchArgument = "CHAT_QUEUE_PROMPT_PREVIEW_MODE"
     private let screenshotModeEnabled: Bool
     private let streamStressModeEnabled: Bool
     @State private var connection: ConnectionManager
@@ -278,10 +279,14 @@ struct OpenLensApp: App {
 
     init() {
 #if DEBUG
-        let streamStressModeEnabled = ProcessInfo.processInfo.arguments.contains(
-            Self.streamStressLaunchArgument
+        let launchArguments = ProcessInfo.processInfo.arguments
+        let queuedPromptPreviewModeEnabled = launchArguments.contains(
+            Self.queuedPromptPreviewLaunchArgument
         )
+        let streamStressModeEnabled = launchArguments.contains(Self.streamStressLaunchArgument)
+            || queuedPromptPreviewModeEnabled
 #else
+        let queuedPromptPreviewModeEnabled = false
         let streamStressModeEnabled = false
 #endif
         let screenshotModeEnabled = ScreenshotFixtures.isEnabled
@@ -377,9 +382,36 @@ struct OpenLensApp: App {
             )
             self._activePreviewSource = State(initialValue: source)
             self._previewConnection = State(initialValue: previewConnection)
-            self._previewChatClient = State(
-                initialValue: ChatClient(demoMode: true, script: preview.script)
-            )
+            let previewClient = ChatClient(demoMode: true, script: preview.script)
+
+            if queuedPromptPreviewModeEnabled {
+                previewClient.currentSession = OCSession(
+                    id: "queued-prompt-preview",
+                    title: "Debug: Queued Prompt",
+                    time: OCSessionTime(created: 0, updated: 0)
+                )
+                previewClient.messages = [
+                    ChatMessage(
+                        role: .user,
+                        content: "Prepare the release checklist."
+                    )
+                ]
+                previewClient.pendingAssistantMessage = ChatMessage(
+                    role: .assistant,
+                    content: "I’m finishing the current response now…",
+                    isStreaming: true
+                )
+                previewClient.isLoading = true
+                previewClient.responseState = .generating
+                previewClient.queuedPrompts = [
+                    QueuedPrompt(
+                        text: "Run the tests after this finishes.",
+                        state: .queued
+                    )
+                ]
+            }
+
+            self._previewChatClient = State(initialValue: previewClient)
         }
     }
 

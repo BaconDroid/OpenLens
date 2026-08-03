@@ -10,6 +10,23 @@ enum ChatResponseState: Equatable {
     case failed
 }
 
+struct QueuedPrompt: Identifiable, Equatable {
+    enum State: Equatable {
+        case submitting
+        case queued
+    }
+
+    let id: UUID
+    let text: String
+    var state: State
+
+    init(id: UUID = UUID(), text: String, state: State) {
+        self.id = id
+        self.text = text
+        self.state = state
+    }
+}
+
 /// Thin coordinator for the chat interface.
 /// Delegates all IO to domain services (MessagesService, ProvidersService,
 /// QuestionService, SessionsService). Keeps UI state and orchestration only.
@@ -34,6 +51,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     var isLoading: Bool = false
     /// True while a follow-up is being admitted to the server-side turn queue.
     var isQueueingPrompt: Bool = false
+    /// Follow-ups that were admitted behind the active turn but have not been
+    /// promoted into the visible transcript yet.
+    var queuedPrompts: [QueuedPrompt] = []
     /// True while OpenCode is reverting a selected user message.
     var isUndoingMessage: Bool = false
     var responseState: ChatResponseState = .idle
@@ -1090,7 +1110,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         if providers.isEmpty {
             await loadProviders()
         }
+        guard !Task.isCancelled, currentSession?.id == session.id else { return }
         await loadMessages()
+        guard !Task.isCancelled, currentSession?.id == session.id else { return }
         await recoverPendingPermission()
         await recoverPendingQuestions()
     }
@@ -1100,6 +1122,7 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             let loaded = try await messagesService!.loadMessages(sessionID: session.id)
+            guard !Task.isCancelled, currentSession?.id == session.id else { return }
             let mergedMessages = mergeLoadedMessagesWithLocallyStoppedMessages(loaded)
             let revert = currentSession?.id == session.id
                 ? currentSession?.revert
@@ -1114,12 +1137,22 @@ final class ChatClient: SSEEventHandlerDelegate {
             Logger.debug.info("messages count: \(visibleMessages.count)")
             self.contentVersion &+= 1
             self.scrollAnchor &+= 1
+        } catch is CancellationError {
+            return
         } catch {
+            guard currentSession?.id == session.id else { return }
             self.errorMessage = "Failed to load messages: \(error.localizedDescription)"
         }
 
         await refreshCurrentSessionStatus()
         await loadTodos()
+    }
+
+    func unloadSession(ifMatching sessionID: String) {
+        guard currentSession?.id == sessionID else { return }
+        resetSessionState()
+        currentSession = nil
+        inputText = ""
     }
 
     nonisolated static func messagesBeforeRevert(
@@ -1615,26 +1648,29 @@ final class ChatClient: SSEEventHandlerDelegate {
             return
         }
 
+        let queuedPrompt = QueuedPrompt(text: text, state: isDemoMode ? .queued : .submitting)
+        inputText = ""
+        queuedPrompts.append(queuedPrompt)
+        contentVersion &+= 1
+        scrollAnchor &+= 1
+
         if isDemoMode {
-            messages.append(ChatMessage(role: .user, content: text))
-            inputText = ""
-            contentVersion &+= 1
-            scrollAnchor &+= 1
             return
         }
 
         if isRecordedReplayMode {
+            queuedPrompts.removeAll { $0.id == queuedPrompt.id }
             errorMessage = AppText.recordedReplayReadOnly
             return
         }
 
         guard let session = currentSession,
               let messagesService else {
+            queuedPrompts.removeAll { $0.id == queuedPrompt.id }
             errorMessage = "Not connected."
             return
         }
 
-        inputText = ""
         isQueueingPrompt = true
 
         Task {
@@ -1647,14 +1683,43 @@ final class ChatClient: SSEEventHandlerDelegate {
             do {
                 try await messagesService.queuePrompt(sessionID: session.id, text: text)
                 guard currentSession?.id == session.id else { return }
-                messages.append(ChatMessage(role: .user, content: text))
-                contentVersion &+= 1
-                scrollAnchor &+= 1
+                acceptQueuedPrompt(id: queuedPrompt.id)
             } catch {
                 guard currentSession?.id == session.id else { return }
+                queuedPrompts.removeAll { $0.id == queuedPrompt.id }
+                if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    inputText = text
+                }
                 errorMessage = "Failed to queue: \(error.localizedDescription)"
+                contentVersion &+= 1
             }
         }
+    }
+
+    private func acceptQueuedPrompt(id: UUID) {
+        guard let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return }
+        queuedPrompts[index].state = .queued
+
+        // The active turn can finish while the admission request is in flight.
+        // Promote immediately in that race; otherwise finishLoading() performs
+        // the transition at the next real turn boundary.
+        if !isLoading {
+            promoteNextQueuedPrompt()
+        }
+    }
+
+    private func promoteNextQueuedPrompt() {
+        guard queuedPrompts.first?.state == .queued else { return }
+        let prompt = queuedPrompts.removeFirst()
+        messages.append(
+            ChatMessage(
+                role: .user,
+                content: prompt.text,
+                createdAt: Date()
+            )
+        )
+        contentVersion &+= 1
+        scrollAnchor &+= 1
     }
 
     private func sendCommand(text: String, command: String, arguments: String) {
@@ -2740,6 +2805,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         connection?.sseClient?.setRawEventRetentionEnabled(false)
         isLoading = false
         isQueueingPrompt = false
+        queuedPrompts = []
         responseState = .idle
         stopFlushTimer()
         cancelTimelineInvalidation()
@@ -2876,6 +2942,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     // MARK: - Finish Loading
 
     func finishLoading() {
+        let completedActiveTurn = isLoading
+            || pendingAssistantMessage != nil
+            || responseState == .generating
+            || responseState == .stopping
         isLoading = false
         abortTask = nil
 
@@ -2908,6 +2978,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         currentActivity = nil
         sessionStatus = nil
         markResponseIdleAfterFinish()
+
+        if completedActiveTurn {
+            promoteNextQueuedPrompt()
+        }
 
         contentVersion &+= 1
     }

@@ -39,10 +39,52 @@ struct QueuedPromptTests {
         client.queuePrompt()
 
         #expect(client.inputText.isEmpty)
-        #expect(client.messages.last?.role == .user)
-        #expect(client.messages.last?.content == "Check the test results next.")
+        #expect(client.messages.isEmpty)
+        #expect(client.queuedPrompts.count == 1)
+        #expect(client.queuedPrompts.first?.text == "Check the test results next.")
+        #expect(client.queuedPrompts.first?.state == .queued)
         #expect(client.isLoading)
         #expect(client.responseState == .generating)
+
+        client.finishLoading()
+
+        #expect(client.queuedPrompts.isEmpty)
+        #expect(client.messages.last?.role == .user)
+        #expect(client.messages.last?.content == "Check the test results next.")
+        #expect(!client.isLoading)
+        #expect(client.responseState == .idle)
+    }
+
+    @MainActor
+    @Test func promotesOnlyOneQueuedFollowUpPerCompletedTurn() {
+        let client = ChatClient(demoMode: true)
+        client.currentSession = OCSession(
+            id: "session-1",
+            title: "Test",
+            time: OCSessionTime(created: 0, updated: 0)
+        )
+        client.isLoading = true
+        client.responseState = .generating
+
+        client.inputText = "First follow-up"
+        client.queuePrompt()
+        client.inputText = "Second follow-up"
+        client.queuePrompt()
+
+        client.finishLoading()
+
+        #expect(client.messages.last?.content == "First follow-up")
+        #expect(client.queuedPrompts.map(\.text) == ["Second follow-up"])
+
+        // A duplicate idle event must not consume another queue entry.
+        client.finishLoading()
+        #expect(client.queuedPrompts.map(\.text) == ["Second follow-up"])
+
+        client.beginExternalResponse()
+        client.finishLoading()
+
+        #expect(client.messages.map(\.content) == ["First follow-up", "Second follow-up"])
+        #expect(client.queuedPrompts.isEmpty)
     }
 }
 
