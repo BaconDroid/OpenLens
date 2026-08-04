@@ -475,6 +475,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         displayedMessages = result
         timelineVersion &+= 1
+        scheduleTurnDiffLoads(for: result)
     }
 
     /// A foreground refresh can return an assistant message while the same
@@ -781,6 +782,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// restored before the worker callback validates membership.
     @ObservationIgnored private var finalizingAssistantMessages: [String: ChatMessage] = [:]
     @ObservationIgnored private var isReconcilingLiveAssistantMessages = false
+    @ObservationIgnored private var turnDiffTasksByAssistantID: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var resolvedTurnDiffAssistantIDs = Set<String>()
+    @ObservationIgnored private var turnFileDetailCache: [TurnFileDetailCacheKey: ReviewFileChange] = [:]
+    @ObservationIgnored private var turnFileDetailCacheOrder: [TurnFileDetailCacheKey] = []
 
     /// Interval between streaming buffer flushes (seconds).
     private static let flushInterval: TimeInterval = 0.04
@@ -808,6 +813,12 @@ final class ChatClient: SSEEventHandlerDelegate {
         label: "com.openlens.ChatClient.streaming-materialization",
         qos: .userInitiated
     )
+    private static let maximumTurnFileDetailCacheCount = 12
+
+    private struct TurnFileDetailCacheKey: Hashable {
+        let userMessageID: String
+        let path: String
+    }
 
     private func syncLiveActivityPendingUserResponse() {
         guard let liveActivityTracker else { return }
@@ -1128,6 +1139,8 @@ final class ChatClient: SSEEventHandlerDelegate {
                 ? currentSession?.revert
                 : session.revert
             let visibleMessages = Self.messagesBeforeRevert(mergedMessages, revert: revert)
+            prepareTurnDiffRefresh(for: visibleMessages)
+            preserveTurnFileChanges(in: visibleMessages)
             self.messages = visibleMessages
             if Self.recentSessionModelSelection(from: visibleMessages) != nil {
                 syncSessionModelSelection(from: visibleMessages)
@@ -1315,6 +1328,144 @@ final class ChatClient: SSEEventHandlerDelegate {
         let existingIDs = Set(result.map(\.id))
         result.append(contentsOf: localStoppedMessages.filter { !existingIDs.contains($0.id) })
         return result
+    }
+
+    private func preserveTurnFileChanges(in loaded: [ChatMessage]) {
+        let existingByID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        for message in loaded {
+            guard let existing = existingByID[message.id], !existing.turnFileChanges.isEmpty else {
+                continue
+            }
+            message.setTurnFileChanges(existing.turnFileChanges)
+            resolvedTurnDiffAssistantIDs.insert(message.id)
+        }
+    }
+
+    private func prepareTurnDiffRefresh(for loaded: [ChatMessage]) {
+        for message in loaded where message.role == .assistant {
+            turnDiffTasksByAssistantID.removeValue(forKey: message.id)?.cancel()
+            resolvedTurnDiffAssistantIDs.remove(message.id)
+        }
+    }
+
+    private func scheduleTurnDiffLoads(for candidateMessages: [ChatMessage]) {
+        guard !isOfflinePreviewMode,
+              let sessionID = currentSession?.id,
+              messagesService != nil else {
+            return
+        }
+
+        for message in candidateMessages where message.role == .assistant && !message.isStreaming {
+            guard message.parentUserMessageID != nil,
+                  !resolvedTurnDiffAssistantIDs.contains(message.id),
+                  turnDiffTasksByAssistantID[message.id] == nil else {
+                continue
+            }
+
+            let assistantMessageID = message.id
+            turnDiffTasksByAssistantID[assistantMessageID] = Task { @MainActor [weak self, weak message] in
+                guard let self, let message else { return }
+                await self.loadTurnDiffSummary(for: message, sessionID: sessionID)
+            }
+        }
+    }
+
+    private func loadTurnDiffSummary(for message: ChatMessage, sessionID: String) async {
+        defer { turnDiffTasksByAssistantID.removeValue(forKey: message.id) }
+
+        guard let userMessageID = message.parentUserMessageID,
+              let messagesService else {
+            return
+        }
+
+        for attempt in 0..<2 {
+            do {
+                let files = try await messagesService.loadTurnFileChanges(
+                    sessionID: sessionID,
+                    userMessageID: userMessageID
+                )
+                guard !Task.isCancelled,
+                      currentSession?.id == sessionID,
+                      messages.contains(where: { $0 === message }) else {
+                    return
+                }
+
+                message.setTurnFileChanges(files.map(TurnFileChangeSummary.init(file:)))
+                resolvedTurnDiffAssistantIDs.insert(message.id)
+                if !files.isEmpty {
+                    timelineVersion &+= 1
+                    contentVersion &+= 1
+                }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                if attempt == 0 {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    guard !Task.isCancelled else { return }
+                    continue
+                }
+
+                resolvedTurnDiffAssistantIDs.insert(message.id)
+                Logger.chat.warning(
+                    "Failed to load turn diff for assistant message \(message.id, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    func loadTurnFileDetail(userMessageID: String, path: String) async throws -> ReviewFileChange {
+        let key = TurnFileDetailCacheKey(userMessageID: userMessageID, path: path)
+        if let cached = turnFileDetailCache[key] {
+            touchTurnFileDetailCacheKey(key)
+            return cached
+        }
+
+        guard let sessionID = currentSession?.id, let messagesService else {
+            throw OpenCodeError.notConnected
+        }
+
+        let files = try await messagesService.loadTurnFileChanges(
+            sessionID: sessionID,
+            userMessageID: userMessageID
+        )
+        guard currentSession?.id == sessionID,
+              let file = files.first(where: { $0.path == path }) else {
+            throw OpenCodeError.invalidPayload("This historical file diff is no longer available.")
+        }
+
+        cacheTurnFileDetail(file, for: key)
+        return file
+    }
+
+    /// Seeds the same lightweight summary and lazy detail cache used by live
+    /// turns so offline previews exercise the production presentation path.
+    func registerDemoTurnFileChanges(_ files: [ReviewFileChange], userMessageID: String) {
+        guard isDemoMode, let pendingAssistantMessage else { return }
+
+        pendingAssistantMessage.setParentUserMessageID(userMessageID)
+        pendingAssistantMessage.setTurnFileChanges(files.map(TurnFileChangeSummary.init(file:)))
+        for file in files {
+            cacheTurnFileDetail(
+                file,
+                for: TurnFileDetailCacheKey(userMessageID: userMessageID, path: file.path)
+            )
+        }
+    }
+
+    private func cacheTurnFileDetail(_ file: ReviewFileChange, for key: TurnFileDetailCacheKey) {
+        turnFileDetailCache[key] = file
+        touchTurnFileDetailCacheKey(key)
+
+        while turnFileDetailCacheOrder.count > Self.maximumTurnFileDetailCacheCount {
+            let oldest = turnFileDetailCacheOrder.removeFirst()
+            turnFileDetailCache.removeValue(forKey: oldest)
+        }
+    }
+
+    private func touchTurnFileDetailCacheKey(_ key: TurnFileDetailCacheKey) {
+        turnFileDetailCacheOrder.removeAll { $0 == key }
+        turnFileDetailCacheOrder.append(key)
     }
 
     func loadTodos() async {
@@ -1914,7 +2065,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             let bufferedUpdates = detachBufferedStreamUpdates(for: pending.id)
             finalizePendingAssistantMessage(
                 pending,
-                appendsWhenEmpty: false,
+                appendsWhenEmpty: true,
                 bufferedUpdates: bufferedUpdates
             )
         }
@@ -2795,6 +2946,11 @@ final class ChatClient: SSEEventHandlerDelegate {
         abortTask = nil
         streamingFinalizationTokens.removeAll()
         finalizingAssistantMessages.removeAll()
+        turnDiffTasksByAssistantID.values.forEach { $0.cancel() }
+        turnDiffTasksByAssistantID.removeAll()
+        resolvedTurnDiffAssistantIDs.removeAll()
+        turnFileDetailCache.removeAll()
+        turnFileDetailCacheOrder.removeAll()
         cancelStoppedStateClear()
         ignoredAssistantMessageIDs.removeAll()
         locallyStoppedSessionID = nil
@@ -2918,6 +3074,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 message.applyStreamingMaterialization(materialized)
                 message.isStreaming = false
                 self.clearStreamingFinalization(messageID: messageID)
+                self.scheduleTurnDiffLoads(for: [message])
                 self.contentVersion &+= 1
                 // The cached timeline switches its row kind from the live
                 // streaming projection to the finalized Markdown message.

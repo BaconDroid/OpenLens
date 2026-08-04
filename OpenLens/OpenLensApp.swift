@@ -7,6 +7,7 @@ private enum BuiltinChatPreview {
     case heavyLoad
     case concurrentSend
     case streamStress
+    case turnDiff
 
     var script: DemoScript {
         switch self {
@@ -20,6 +21,8 @@ private enum BuiltinChatPreview {
             return .concurrentSend
         case .streamStress:
             return .streamStress
+        case .turnDiff:
+            return .turnDiffPreview
         }
     }
 
@@ -35,6 +38,8 @@ private enum BuiltinChatPreview {
             return "chat-concurrent-send"
         case .streamStress:
             return "chat-stream-stress"
+        case .turnDiff:
+            return "chat-turn-diff"
         }
     }
 
@@ -50,6 +55,8 @@ private enum BuiltinChatPreview {
             return "concurrent-send"
         case .streamStress:
             return "stress"
+        case .turnDiff:
+            return "turn-diff"
         }
     }
 }
@@ -176,6 +183,7 @@ func shouldHandleConnectionAsFreshConnect(
 struct OpenLensApp: App {
     private static let streamStressLaunchArgument = "CHAT_STREAM_STRESS_MODE"
     private static let queuedPromptPreviewLaunchArgument = "CHAT_QUEUE_PROMPT_PREVIEW_MODE"
+    private static let turnDiffPreviewLaunchArgument = "CHAT_TURN_DIFF_PREVIEW_MODE"
     private let screenshotModeEnabled: Bool
     private let streamStressModeEnabled: Bool
     @State private var connection: ConnectionManager
@@ -283,10 +291,13 @@ struct OpenLensApp: App {
         let queuedPromptPreviewModeEnabled = launchArguments.contains(
             Self.queuedPromptPreviewLaunchArgument
         )
+        let turnDiffPreviewModeEnabled = launchArguments.contains(Self.turnDiffPreviewLaunchArgument)
         let streamStressModeEnabled = launchArguments.contains(Self.streamStressLaunchArgument)
             || queuedPromptPreviewModeEnabled
+            || turnDiffPreviewModeEnabled
 #else
         let queuedPromptPreviewModeEnabled = false
+        let turnDiffPreviewModeEnabled = false
         let streamStressModeEnabled = false
 #endif
         let screenshotModeEnabled = ScreenshotFixtures.isEnabled
@@ -373,7 +384,9 @@ struct OpenLensApp: App {
         }
 
         if streamStressModeEnabled {
-            let preview = BuiltinChatPreview.streamStress
+            let preview = turnDiffPreviewModeEnabled
+                ? BuiltinChatPreview.turnDiff
+                : BuiltinChatPreview.streamStress
             let source = ChatPreviewSource.builtin(preview)
             let previewConnection = ConnectionManager()
             previewConnection.configureDemoState(

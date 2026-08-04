@@ -321,7 +321,8 @@ final class SSEEventHandler {
                             tokens: tokens ?? existing.tokens,
                             modelID: serverModelID ?? existing.modelID,
                             providerID: serverProviderID ?? existing.providerID,
-                            finish: finish
+                            finish: finish,
+                            parentUserMessageID: update.parentID ?? existing.parentUserMessageID
                         )
                         delegate.pendingAssistantMessage = replacement
                     }
@@ -332,6 +333,7 @@ final class SSEEventHandler {
                 if let mid = serverModelID { existing.modelID = mid }
                 if let pid = serverProviderID { existing.providerID = pid }
                 existing.finish = finish
+                existing.setParentUserMessageID(update.parentID)
 
                 // Update Live Activity cost
                 if let cost {
@@ -348,7 +350,8 @@ final class SSEEventHandler {
                     tokens: tokens,
                     modelID: serverModelID,
                     providerID: serverProviderID,
-                    finish: finish
+                    finish: finish,
+                    parentUserMessageID: update.parentID
                 )
                 if !delegate.isLoading {
                     delegate.beginExternalResponse()

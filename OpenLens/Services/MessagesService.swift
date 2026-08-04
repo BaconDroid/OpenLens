@@ -81,6 +81,20 @@ final class MessagesService {
         let _ = try await client.abortSession(id: sessionID)
     }
 
+    // MARK: - Turn Diffs
+
+    func loadTurnFileChanges(sessionID: String, userMessageID: String) async throws -> [ReviewFileChange] {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+
+        return try await client.getSessionDiff(sessionID: sessionID, messageID: userMessageID)
+            .map(ReviewFileChange.init(diff:))
+            .sorted { lhs, rhs in
+                lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+            }
+    }
+
     // MARK: - Undo
 
     /// Reverts a user message and the work that followed it, restoring the
@@ -117,7 +131,8 @@ final class MessagesService {
             tokens: msg.info.tokens,
             modelID: resolvedModelID,
             providerID: resolvedProviderID,
-            finish: msg.info.finish
+            finish: msg.info.finish,
+            parentUserMessageID: msg.info.parentID
         )
     }
 }

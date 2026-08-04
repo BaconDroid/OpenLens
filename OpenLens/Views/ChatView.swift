@@ -2158,6 +2158,8 @@ private struct ChatMessagesListView: View {
                 assistantSegments: [],
                 streamingText: projection
             )
+        case .turnFileChanges(let message):
+            TurnFileChangesTimelineRow(chatClient: chatClient, message: message)
         }
     }
 

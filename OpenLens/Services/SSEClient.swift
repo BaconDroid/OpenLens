@@ -17,6 +17,7 @@ nonisolated struct SSEMessageUpdate {
     let modelID: String?
     let providerID: String?
     let finish: String?
+    let parentID: String?
 
     init?(event: OCEvent) {
         guard let properties = event.properties?.value as? [String: Any],
@@ -44,6 +45,9 @@ nonisolated struct SSEMessageUpdate {
         self.modelID = StreamDisplayValue.preview(decodedInfo?.modelID ?? info["modelID"] as? String, maximumBytes: 160)
         self.providerID = StreamDisplayValue.preview(decodedInfo?.providerID ?? info["providerID"] as? String, maximumBytes: 160)
         self.finish = StreamDisplayValue.preview(decodedInfo?.finish ?? info["finish"] as? String, maximumBytes: 80)
+        self.parentID = (decodedInfo?.parentID ?? info["parentID"] as? String).flatMap {
+            StreamDisplayValue.fitsIdentifier($0) ? $0 : nil
+        }
     }
 }
 
