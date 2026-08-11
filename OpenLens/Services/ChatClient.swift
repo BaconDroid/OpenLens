@@ -132,6 +132,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     private var preferredDefaultModelID: String = ""
     private var serverReportedDefault: (providerID: String, modelID: String)?
     private var configReportedDefault: (providerID: String, modelID: String)?
+    private var inMemoryRecentModelIDs: [String] = []
+    private var globalQuickModelAssignments: [ModelQuickAction: QuickModelAssignment] = AppPreferences.quickModelAssignments()
+    var quickModelAssignmentsVersion: UInt = 0
 
     /// Provider filter lists from server config (enabled_providers / disabled_providers).
     private var enabledProviders: [String]? {
@@ -217,9 +220,16 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func persistCurrentSelection() {
-        guard let connID = savedConnectionsStore?.activeConnectionID,
-              !selectedProviderID.isEmpty,
-              !selectedModelID.isEmpty else { return }
+        guard !selectedProviderID.isEmpty, !selectedModelID.isEmpty else { return }
+
+        let selectionID = "\(selectedProviderID)/\(selectedModelID)"
+        guard let connID = savedConnectionsStore?.activeConnectionID else {
+            guard isDemoMode else { return }
+            inMemoryRecentModelIDs.removeAll { $0 == selectionID }
+            inMemoryRecentModelIDs.insert(selectionID, at: 0)
+            inMemoryRecentModelIDs = Array(inMemoryRecentModelIDs.prefix(5))
+            return
+        }
 
         savedConnectionsStore?.updateModelSelection(
             connectionID: connID,
@@ -361,7 +371,121 @@ final class ChatClient: SSEEventHandlerDelegate {
         if !selectedModelID.isEmpty {
             return selectedModelID
         }
-        return "Choose model"
+        return AppText.chooseModel
+    }
+
+    var recentModelIDs: [String] {
+        guard let savedConnectionsStore, let connectionID = quickModelConnectionID else {
+            return inMemoryRecentModelIDs
+        }
+        return savedConnectionsStore.recentModelSelections(connectionID: connectionID).map(\.id)
+    }
+
+    /// Models assigned to the global Code and Review quick actions.
+    /// A revision counter keeps views that read the persisted preferences up
+    /// to date after an assignment changes.
+    var quickModelAssignments: [ModelQuickAction: QuickModelAssignment] {
+        _ = quickModelAssignmentsVersion
+        return globalQuickModelAssignments
+    }
+
+    func quickModelAssignment(for action: ModelQuickAction) -> QuickModelAssignment? {
+        quickModelAssignments[action]
+    }
+
+    private var quickModelConnectionID: String? {
+        guard let savedConnectionsStore else { return nil }
+        return savedConnectionsStore.activeConnectionID ?? savedConnectionsStore.mostRecent?.id
+    }
+
+    /// Saves a model and optional reasoning variant for a quick action without
+    /// changing the active session model.
+    func assignQuickModel(
+        _ model: SelectableModel,
+        variant: String?,
+        for action: ModelQuickAction
+    ) {
+        let validVariant = variant.flatMap { variantID in
+            model.variants.contains(where: {
+                $0.id == variantID && $0.value.isThinkingEffortVariant
+            }) ? variantID : nil
+        }
+        globalQuickModelAssignments[action] = QuickModelAssignment(
+            providerID: model.providerID,
+            modelID: model.modelID,
+            variant: validVariant
+        )
+        AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+        quickModelAssignmentsVersion &+= 1
+    }
+
+    /// Removes the model assigned to a quick action.
+    func clearQuickModelAssignment(for action: ModelQuickAction) {
+        globalQuickModelAssignments.removeValue(forKey: action)
+        AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+        quickModelAssignmentsVersion &+= 1
+    }
+
+    /// Updates only the reasoning variant for an existing quick action.
+    func updateQuickModelVariant(for action: ModelQuickAction, variantID: String?) {
+        guard var assignment = globalQuickModelAssignments[action] else { return }
+
+        if let variantID,
+           let model = availableModels.first(where: { $0.id == assignment.id }),
+           !model.variants.contains(where: { $0.id == variantID && $0.value.isThinkingEffortVariant }) {
+            assignment.variant = nil
+        } else {
+            assignment.variant = variantID
+        }
+
+        globalQuickModelAssignments[action] = assignment
+        AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+        quickModelAssignmentsVersion &+= 1
+    }
+
+    /// Activates the model assigned to a quick action, if it is available.
+    @discardableResult
+    func selectQuickModelAction(_ action: ModelQuickAction) -> Bool {
+        guard let assignment = quickModelAssignment(for: action),
+              let model = availableModels.first(where: { $0.id == assignment.id }) else {
+            return false
+        }
+
+        selectModel(model)
+        selectVariant(assignment.variant)
+        return true
+    }
+
+    /// Removes assignments that no longer resolve after a successful provider
+    /// refresh. A missing variant resets to Default while retaining its model.
+    private func synchronizeQuickModelAssignments() {
+        var didChange = false
+
+        for action in ModelQuickAction.allCases {
+            guard let assignment = globalQuickModelAssignments[action] else { continue }
+
+            guard let model = availableModels.first(where: { $0.id == assignment.id }) else {
+                globalQuickModelAssignments.removeValue(forKey: action)
+                didChange = true
+                continue
+            }
+
+            guard let variant = assignment.variant else { continue }
+            let isAvailable = model.variants.contains {
+                $0.id == variant && $0.value.isThinkingEffortVariant
+            }
+            guard !isAvailable else { continue }
+
+            var updatedAssignment = assignment
+            updatedAssignment.variant = nil
+            globalQuickModelAssignments[action] = updatedAssignment
+            didChange = true
+        }
+
+        if didChange {
+            AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+            quickModelAssignmentsVersion &+= 1
+        }
     }
 
     struct DefaultModelResolution: Equatable {
@@ -1529,7 +1653,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     func loadProviders() async {
         guard !isOfflinePreviewMode else { return }
         isLoadingProviders = true
-        defer { isLoadingProviders = false }
+        var didLoadProvidersSuccessfully = false
+        defer {
+            isLoadingProviders = false
+            quickModelAssignmentsVersion &+= 1
+        }
 
         // Load config first — we need filter lists before selecting a model
         let configResult = await providersService!.loadConfig()
@@ -1549,6 +1677,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             let result = try await providersService!.loadProviders()
             self.providers = result.providers
             self.connectedProviderIDs = result.connectedProviderIDs
+            didLoadProvidersSuccessfully = true
             serverDefault = result.defaultProviderID.flatMap { providerID in
                 result.defaultModelID.map { (providerID: providerID, modelID: $0) }
             }
@@ -1598,6 +1727,10 @@ final class ChatClient: SSEEventHandlerDelegate {
                   !availableReasoningVariants.contains(where: { $0.id == selectedVariant }) {
             self.selectedVariant = nil
             persistCurrentSelection()
+        }
+
+        if didLoadProvidersSuccessfully {
+            synchronizeQuickModelAssignments()
         }
     }
 

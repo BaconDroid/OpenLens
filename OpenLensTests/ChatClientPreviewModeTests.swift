@@ -50,6 +50,77 @@ struct ChatClientPreviewModeTests {
         #expect(selection?.modelID == "claude-sonnet-4-20250514")
     }
 
+    @Test func modelPickerSearchMatchesProviderNameModelNameAndIDs() {
+        let models = [
+            ChatClient.SelectableModel(
+                providerID: "anthropic",
+                providerName: "Anthropic",
+                modelID: "claude-sonnet",
+                modelName: "Claude Sonnet",
+                reasoning: true,
+                attachment: false,
+                toolCall: true,
+                cost: nil,
+                limit: nil,
+                variants: []
+            ),
+            ChatClient.SelectableModel(
+                providerID: "openai",
+                providerName: "OpenAI",
+                modelID: "gpt-5",
+                modelName: "GPT-5",
+                reasoning: true,
+                attachment: false,
+                toolCall: true,
+                cost: nil,
+                limit: nil,
+                variants: []
+            ),
+        ]
+
+        #expect(ModelPickerView.models(matching: "Anthropic", from: models).map(\.id) == ["anthropic/claude-sonnet"])
+        #expect(ModelPickerView.models(matching: "GPT-5", from: models).map(\.id) == ["openai/gpt-5"])
+        #expect(ModelPickerView.models(matching: "anthropic", from: models).map(\.id) == ["anthropic/claude-sonnet"])
+        #expect(ModelPickerView.models(matching: "openai/gpt-5", from: models).map(\.id) == ["openai/gpt-5"])
+        #expect(ModelPickerView.models(matching: "", from: models).map(\.id) == models.map(\.id))
+    }
+
+    @Test func modelPickerOrdersAvailableRecentModelsAndSkipsUnavailableIDs() {
+        let models = [
+            ChatClient.SelectableModel(
+                providerID: "anthropic",
+                providerName: "Anthropic",
+                modelID: "claude-sonnet",
+                modelName: "Claude Sonnet",
+                reasoning: true,
+                attachment: false,
+                toolCall: true,
+                cost: nil,
+                limit: nil,
+                variants: []
+            ),
+            ChatClient.SelectableModel(
+                providerID: "openai",
+                providerName: "OpenAI",
+                modelID: "gpt-5",
+                modelName: "GPT-5",
+                reasoning: true,
+                attachment: false,
+                toolCall: true,
+                cost: nil,
+                limit: nil,
+                variants: []
+            ),
+        ]
+
+        let recent = ModelPickerView.orderedRecentModels(
+            from: models,
+            recentModelIDs: ["missing/model", "openai/gpt-5", "openai/gpt-5", "anthropic/claude-sonnet"]
+        )
+
+        #expect(recent.map(\.id) == ["openai/gpt-5", "anthropic/claude-sonnet"])
+    }
+
     @MainActor
     @Test func createsDebugPreviewSessionFromSelectedScript() async {
         let client = ChatClient(demoMode: true, script: .debugBaseline)
@@ -57,6 +128,102 @@ struct ChatClientPreviewModeTests {
         await client.ensureSession()
 
         #expect(client.currentSession?.title == DemoScript.debugBaseline.sessionTitle)
+    }
+
+    @MainActor
+    @Test func demoModelSelectionTracksRecentModelsWithoutAConnectionStore() {
+        let client = ChatClient(demoMode: true)
+        let firstModel = ChatClient.SelectableModel(
+            providerID: "anthropic",
+            providerName: "Anthropic",
+            modelID: "claude-sonnet",
+            modelName: "Claude Sonnet",
+            reasoning: true,
+            attachment: false,
+            toolCall: true,
+            cost: nil,
+            limit: nil,
+            variants: []
+        )
+        let secondModel = ChatClient.SelectableModel(
+            providerID: "openai",
+            providerName: "OpenAI",
+            modelID: "gpt-5",
+            modelName: "GPT-5",
+            reasoning: true,
+            attachment: false,
+            toolCall: true,
+            cost: nil,
+            limit: nil,
+            variants: []
+        )
+
+        client.selectModel(firstModel)
+        client.selectModel(secondModel)
+
+        #expect(client.recentModelIDs == ["openai/gpt-5", "anthropic/claude-sonnet"])
+    }
+
+    @MainActor
+    @Test func quickActionsRememberTheirGlobalModelAssignments() {
+        let client = ChatClient(demoMode: true)
+        client.clearQuickModelAssignment(for: .code)
+        client.clearQuickModelAssignment(for: .review)
+        client.clearQuickModelAssignment(for: .prsAndStuff)
+        defer {
+            client.clearQuickModelAssignment(for: .code)
+            client.clearQuickModelAssignment(for: .review)
+            client.clearQuickModelAssignment(for: .prsAndStuff)
+        }
+        let codeModel = ChatClient.SelectableModel(
+            providerID: "anthropic",
+            providerName: "Anthropic",
+            modelID: "claude-sonnet",
+            modelName: "Claude Sonnet",
+            reasoning: true,
+            attachment: false,
+            toolCall: true,
+            cost: nil,
+            limit: nil,
+            variants: []
+        )
+        let reviewModel = ChatClient.SelectableModel(
+            providerID: "openai",
+            providerName: "OpenAI",
+            modelID: "gpt-5",
+            modelName: "GPT-5",
+            reasoning: true,
+            attachment: false,
+            toolCall: true,
+            cost: nil,
+            limit: nil,
+            variants: []
+        )
+        let prsModel = ChatClient.SelectableModel(
+            providerID: "google",
+            providerName: "Google",
+            modelID: "gemini-pro",
+            modelName: "Gemini Pro",
+            reasoning: true,
+            attachment: false,
+            toolCall: true,
+            cost: nil,
+            limit: nil,
+            variants: []
+        )
+
+        client.assignQuickModel(codeModel, variant: nil, for: .code)
+        client.assignQuickModel(reviewModel, variant: nil, for: .review)
+        client.assignQuickModel(prsModel, variant: nil, for: .prsAndStuff)
+
+        #expect(client.quickModelAssignment(for: .code)?.id == "anthropic/claude-sonnet")
+        #expect(client.quickModelAssignment(for: .review)?.id == "openai/gpt-5")
+        #expect(client.quickModelAssignment(for: .prsAndStuff)?.id == "google/gemini-pro")
+
+        client.clearQuickModelAssignment(for: .review)
+
+        #expect(client.quickModelAssignment(for: .review) == nil)
+        #expect(client.quickModelAssignment(for: .code)?.id == "anthropic/claude-sonnet")
     }
 
     @Test func debugBaselineIncludesLongStreamingReasoningAndTools() {

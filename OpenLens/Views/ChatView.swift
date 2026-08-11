@@ -141,26 +141,10 @@ struct ChatView: View {
         // MARK: - Sheets
 
         .sheet(isPresented: $chatClient.showActivityCard) {
-            if let activity = chatClient.currentActivity ?? chatClient.lastCompletedActivity {
-                AgentActivityCard(activity: activity)
-                    .presentationDetents([.medium, .large])
-            }
+            activityCardSheet
         }
         .sheet(isPresented: $showModelPicker) {
-            ModelPickerView(
-                models: chatClient.availableModels,
-                selectedProviderID: chatClient.selectedProviderID,
-                selectedModelID: chatClient.selectedModelID,
-                isLoading: chatClient.isLoadingProviders,
-                defaultModelSelection: chatClient.defaultModelSelection,
-                visualMode: visualMode
-            ) { model in
-                chatClient.selectModel(model)
-                showModelPicker = false
-            } onToggleDefault: { model in
-                chatClient.toggleDefaultModel(model)
-            }
-            .presentationDetents([.medium])
+            modelPickerSheet
         }
         .sheet(isPresented: $showContextStatus) {
             if let contextUsage = chatClient.contextUsageSummary {
@@ -394,6 +378,71 @@ struct ChatView: View {
         }
     }
 
+    @ViewBuilder
+    private var activityCardSheet: some View {
+        if let activity = chatClient.currentActivity ?? chatClient.lastCompletedActivity {
+            AgentActivityCard(activity: activity)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var modelPickerSheet: some View {
+        ModelPickerView(
+            models: chatClient.availableModels,
+            selectedProviderID: chatClient.selectedProviderID,
+            selectedModelID: chatClient.selectedModelID,
+            isLoading: chatClient.isLoadingProviders,
+            defaultModelSelection: chatClient.defaultModelSelection,
+            recentModelIDs: chatClient.recentModelIDs,
+            quickModelAssignments: chatClient.quickModelAssignments,
+            visualMode: visualMode,
+            onSelect: { model in handleModelPickerSelection(model) },
+            onToggleDefault: { model in handleModelPickerDefaultToggle(model) },
+            onActivateQuickAction: { action in handleQuickActionActivation(action) },
+            onAssignQuickModel: { action, model, variant in
+                handleQuickModelAssignment(action, model: model, variant: variant)
+            },
+            onChangeQuickVariant: { action, variant in
+                handleQuickVariantChange(action, variant: variant)
+            },
+            onClearQuickModel: { action in handleQuickModelClear(action) }
+        )
+        .presentationDetents([.medium])
+    }
+
+    private func handleModelPickerSelection(_ model: ChatClient.SelectableModel) {
+        chatClient.selectModel(model)
+        showModelPicker = false
+    }
+
+    private func handleModelPickerDefaultToggle(_ model: ChatClient.SelectableModel) {
+        chatClient.toggleDefaultModel(model)
+    }
+
+    private func handleQuickActionActivation(_ action: ModelQuickAction) {
+        if chatClient.selectQuickModelAction(action) {
+            showModelPicker = false
+        }
+    }
+
+    private func handleQuickModelAssignment(
+        _ action: ModelQuickAction,
+        model: ChatClient.SelectableModel,
+        variant: String?
+    ) {
+        chatClient.assignQuickModel(model, variant: variant, for: action)
+        showModelPicker = false
+    }
+
+    private func handleQuickVariantChange(_ action: ModelQuickAction, variant: String?) {
+        chatClient.updateQuickModelVariant(for: action, variantID: variant)
+        showModelPicker = false
+    }
+
+    private func handleQuickModelClear(_ action: ModelQuickAction) {
+        chatClient.clearQuickModelAssignment(for: action)
+    }
+
     private func todoColor(for status: String) -> Color {
         switch status {
         case "completed": isRetroChat ? RetroChatStyle.blueAccent : .green
@@ -420,7 +469,7 @@ struct ChatView: View {
     private var modelSelectionRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
             ViewThatFits {
-                HStack {
+                HStack(spacing: 6) {
                     modelSelectorButton
 
                     if chatClient.showsThinkingEffortPicker {
@@ -428,7 +477,7 @@ struct ChatView: View {
                     }
                 }
 
-                VStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 6) {
                     modelSelectorButton
 
                     if chatClient.showsThinkingEffortPicker {

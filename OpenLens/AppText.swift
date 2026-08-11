@@ -17,6 +17,7 @@ enum AppText {
     static let browseCaptures = "Browse Captures"
     static let browseCapturesSubtitle = "Replay saved assistant turns without a live server"
     static let cancel = "Cancel"
+    static let code = "Code"
     static let connect = "Connect"
     static let connecting = "Connecting..."
     static let connectingSubtitle = "Establishing connection to the server"
@@ -60,6 +61,11 @@ enum AppText {
     static let manualConnectErrorTitle = "Could not connect to server"
     static let messagePlaceholder = "Ask anything or use /command"
     static let model = "Model"
+    static let chooseModel = "Choose model"
+    static let recentModels = "Recent"
+    static let searchModels = "Search models"
+    static let noMatchingModelsTitle = "No Models Found"
+    static let noMatchingModelsSubtitle = "Try a different search."
     static let defaultModel = "Default Model"
     static let setAsDefaultModel = "Set as default model"
     static let clearDefaultModel = "Clear default model"
@@ -84,6 +90,14 @@ enum AppText {
     static let providerModel = "Provider & Model"
     static let providerSubtitle = "Current AI provider configuration"
     static let projectFallback = "Unknown Project"
+    static let prsAndStuff = "PR's and stuff"
+    static let quickActions = "Quick Actions"
+    static let configureQuickActions = "Configure Quick Actions"
+    static func chooseQuickActionModel(_ action: String) -> String { "Choose \(action) model" }
+    static func chooseQuickActionVariant(_ action: String) -> String { "Choose \(action) variant" }
+    static func changeQuickActionModel(_ action: String) -> String { "Change \(action) model" }
+    static func changeQuickActionVariant(_ action: String) -> String { "Change \(action) variant" }
+    static func clearQuickActionModel(_ action: String) -> String { "Clear \(action) model" }
     static let queuePrompt = "Queue prompt"
     static let queuePromptQueued = "Queued"
     static let queuePromptRunsNext = "Runs next"
@@ -112,6 +126,7 @@ enum AppText {
     static let responseGenerating = "Generating"
     static let responseStopped = "Stopped"
     static let responseStopping = "Stopping..."
+    static let review = "Review"
     static let reasoning = "Reasoning"
     static let reconnecting = "Reconnecting..."
     static let reconnectingSubtitle = "Reconnecting to your saved server"

@@ -1,6 +1,51 @@
 import Foundation
 import os
 
+struct SavedModelSelection: Codable, Equatable, Hashable, Identifiable {
+    let providerID: String
+    let modelID: String
+
+    var id: String { "\(providerID)/\(modelID)" }
+}
+
+struct QuickModelAssignment: Codable, Equatable, Hashable, Identifiable {
+    let providerID: String
+    let modelID: String
+    var variant: String?
+
+    init(providerID: String, modelID: String, variant: String? = nil) {
+        self.providerID = providerID
+        self.modelID = modelID
+        self.variant = variant
+    }
+
+    var id: String { "\(providerID)/\(modelID)" }
+}
+
+enum ModelQuickAction: String, CaseIterable, Hashable, Identifiable {
+    case code
+    case review
+    case prsAndStuff
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .code: AppText.code
+        case .review: AppText.review
+        case .prsAndStuff: AppText.prsAndStuff
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .code: "chevron.left.forwardslash.chevron.right"
+        case .review: "checkmark.circle"
+        case .prsAndStuff: "arrow.triangle.merge"
+        }
+    }
+}
+
 /// A single saved server connection — all fields stored in Keychain as JSON.
 struct SavedConnection: Codable, Identifiable, Hashable {
     /// Stable identifier for this saved connection.
@@ -27,6 +72,9 @@ struct SavedConnection: Codable, Identifiable, Hashable {
 
     /// Per-connection model variant / thinking effort (e.g. "high").
     var selectedVariant: String?
+
+    /// Recently selected models for this connection, newest first.
+    var recentModelSelections: [SavedModelSelection]?
 
     /// Per-connection default model: provider ID used for new sessions.
     var defaultProviderID: String? = nil
@@ -62,6 +110,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
         selectedProviderID: String? = nil,
         selectedModelID: String? = nil,
         selectedVariant: String? = nil,
+        recentModelSelections: [SavedModelSelection]? = nil,
         selectedProjectDirectory: String? = nil,
         recentProjectDirectories: [String]? = nil,
         lastConnectedAt: Date? = nil
@@ -74,6 +123,7 @@ struct SavedConnection: Codable, Identifiable, Hashable {
         self.selectedProviderID = selectedProviderID
         self.selectedModelID = selectedModelID
         self.selectedVariant = selectedVariant
+        self.recentModelSelections = recentModelSelections
         self.defaultProviderID = nil
         self.defaultModelID = nil
         self.selectedProjectDirectory = selectedProjectDirectory
@@ -121,6 +171,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
     var selectedProviderID: String?
     var selectedModelID: String?
     var selectedVariant: String?
+    var recentModelSelections: [SavedModelSelection]?
     var defaultProviderID: String? = nil
     var defaultModelID: String? = nil
     var selectedProjectDirectory: String?
@@ -135,6 +186,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
         selectedProviderID = connection.selectedProviderID
         selectedModelID = connection.selectedModelID
         selectedVariant = connection.selectedVariant
+        recentModelSelections = connection.recentModelSelections
         defaultProviderID = connection.defaultProviderID
         defaultModelID = connection.defaultModelID
         selectedProjectDirectory = connection.selectedProjectDirectory
@@ -152,6 +204,7 @@ struct SavedConnectionPublicSnapshot: Codable, Equatable {
             selectedProviderID: selectedProviderID,
             selectedModelID: selectedModelID,
             selectedVariant: selectedVariant,
+            recentModelSelections: recentModelSelections,
             selectedProjectDirectory: selectedProjectDirectory,
             recentProjectDirectories: recentProjectDirectories,
             lastConnectedAt: lastConnectedAt
@@ -182,6 +235,7 @@ final class SavedConnectionsStore {
     /// Flag to track whether migration from legacy UserDefaults has run.
     private static let migrationDoneKey = "saved_connections_migrated"
     private static let maximumSavedConnections = 20
+    private static let maximumRecentModelSelections = 5
     private static let maximumRecentProjectDirectories = 5
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "OpenLens", category: "SavedConnectionsStore")
@@ -291,6 +345,10 @@ final class SavedConnectionsStore {
         connections[index].selectedProviderID = providerID
         connections[index].selectedModelID = modelID
         connections[index].selectedVariant = variant
+        connections[index].recentModelSelections = Self.updatedRecentModelSelections(
+            existing: connections[index].recentModelSelections ?? [],
+            selected: SavedModelSelection(providerID: providerID, modelID: modelID)
+        )
         persist()
     }
 
@@ -339,6 +397,26 @@ final class SavedConnectionsStore {
               let provider = conn.selectedProviderID, !provider.isEmpty,
               let model = conn.selectedModelID, !model.isEmpty else { return nil }
         return (providerID: provider, modelID: model, variant: conn.selectedVariant)
+    }
+
+    /// Returns recently selected models for the given connection, newest first.
+    /// The current selection is included for connections saved before model
+    /// history was added.
+    func recentModelSelections(connectionID: String) -> [SavedModelSelection] {
+        guard let connection = connections.first(where: { $0.id == connectionID }) else { return [] }
+
+        let currentSelection: SavedModelSelection?
+        if let providerID = connection.selectedProviderID?.nilIfBlank,
+           let modelID = connection.selectedModelID?.nilIfBlank {
+            currentSelection = SavedModelSelection(providerID: providerID, modelID: modelID)
+        } else {
+            currentSelection = nil
+        }
+
+        return Self.updatedRecentModelSelections(
+            existing: connection.recentModelSelections ?? [],
+            selected: currentSelection
+        )
     }
 
     /// Returns default model selection for the given connection ID.
@@ -551,6 +629,18 @@ final class SavedConnectionsStore {
         return Array(deduplicated.prefix(maximumRecentProjectDirectories))
     }
 
+    private static func updatedRecentModelSelections(
+        existing: [SavedModelSelection],
+        selected: SavedModelSelection?
+    ) -> [SavedModelSelection] {
+        var selections = [selected].compactMap { $0 }
+        selections.append(contentsOf: existing)
+
+        var seen = Set<String>()
+        let deduplicated = selections.filter { seen.insert($0.id).inserted }
+        return Array(deduplicated.prefix(maximumRecentModelSelections))
+    }
+
     // MARK: - Migration from Legacy UserDefaults + Keychain
 
     private func migrateFromLegacyIfNeeded() {
@@ -618,6 +708,7 @@ private extension SavedConnection {
         selectedProviderID = snapshot.selectedProviderID
         selectedModelID = snapshot.selectedModelID
         selectedVariant = snapshot.selectedVariant
+        recentModelSelections = snapshot.recentModelSelections
         defaultProviderID = snapshot.defaultProviderID
         defaultModelID = snapshot.defaultModelID
         selectedProjectDirectory = snapshot.selectedProjectDirectory
