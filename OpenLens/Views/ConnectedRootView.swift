@@ -32,6 +32,11 @@ struct ConnectedRootView: View {
                     } label: {
                         tabLabel(for: .chat, selectedTab: router.selectedTab)
                     }
+                    Tab(value: AppTab.micro) {
+                        tabNavigationView(for: .micro)
+                    } label: {
+                        tabLabel(for: .micro, selectedTab: router.selectedTab)
+                    }
                     Tab(value: AppTab.review) {
                         tabNavigationView(for: .review)
                     } label: {
@@ -141,6 +146,8 @@ struct ConnectedRootView: View {
                 onSelect: selectChatSession,
                 onDelete: handleDeletedSession
             )
+        case .micro:
+            MicroRootView(chatClient: chatClient)
         case .review:
             ReviewRootView(chatClient: chatClient)
         case .workspace:
@@ -217,6 +224,10 @@ private struct ConnectedSidebarLayout: View {
         case .chat:
             sidebarNavigationStack(for: .chat) {
                 ChatDetailPlaceholderView()
+            }
+        case .micro:
+            sidebarNavigationStack(for: .micro) {
+                MicroRootView(chatClient: chatClient)
             }
         case .review:
             sidebarNavigationStack(for: .review) {

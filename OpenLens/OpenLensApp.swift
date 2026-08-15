@@ -309,9 +309,6 @@ struct OpenLensApp: App {
             )
         )
 
-//        if screenshotModeEnabled, let launchTab = ScreenshotFixtures.launchTab {
-//            router.selectedTab = launchTab
-//        }
 //        if screenshotModeEnabled, ScreenshotFixtures.opensDefaultChatSession {
 //            router.selectedTab = .chat
 //            router.chatPath = [.chatSession(session: ScreenshotFixtures.defaultSession)]
@@ -381,6 +378,10 @@ struct OpenLensApp: App {
                 savedConnectionsStore: savedConnections,
                 recordedReplayStore: recordedReplayStore
             ))
+        }
+
+        if screenshotModeEnabled, let launchTab = ScreenshotFixtures.launchTab {
+            router.selectedTab = launchTab
         }
 
         if streamStressModeEnabled {
