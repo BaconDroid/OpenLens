@@ -32,11 +32,6 @@ struct ConnectedRootView: View {
                     } label: {
                         tabLabel(for: .chat, selectedTab: router.selectedTab)
                     }
-                    Tab(value: AppTab.micro) {
-                        tabNavigationView(for: .micro)
-                    } label: {
-                        tabLabel(for: .micro, selectedTab: router.selectedTab)
-                    }
                     Tab(value: AppTab.review) {
                         tabNavigationView(for: .review)
                     } label: {
