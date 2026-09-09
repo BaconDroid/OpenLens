@@ -6,6 +6,7 @@ enum ScreenshotFixtures {
     static let chatSessionArgument = "SCREENSHOT_CHAT_SESSION"
     static let permissionSheetArgument = "SCREENSHOT_PERMISSION_SHEET"
     static let permissionAllowAllConfirmationArgument = "SCREENSHOT_PERMISSION_ALLOW_ALL_CONFIRMATION"
+    static let turnDiffSheetArgument = "CHAT_TURN_DIFF_SHEET_PREVIEW_MODE"
     static let settingsSectionArgumentPrefix = "SCREENSHOT_SETTINGS_SECTION="
     static let environmentKey = "OPENLENS_SCREENSHOT_MODE"
     static let tabEnvironmentKey = "OPENLENS_SCREENSHOT_TAB"
@@ -48,6 +49,14 @@ enum ScreenshotFixtures {
         let processInfo = ProcessInfo.processInfo
         return processInfo.arguments.contains(permissionAllowAllConfirmationArgument)
             || processInfo.environment[permissionAllowAllConfirmationEnvironmentKey] == "1"
+    }
+
+    static var opensTurnDiffSheet: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains(turnDiffSheetArgument)
+#else
+        false
+#endif
     }
 
     static var settingsSection: String? {

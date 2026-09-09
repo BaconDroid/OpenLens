@@ -17,6 +17,7 @@ nonisolated struct SSEMessageUpdate {
     let modelID: String?
     let providerID: String?
     let finish: String?
+    let parentID: String?
 
     init?(event: OCEvent) {
         guard let properties = event.properties?.value as? [String: Any],
@@ -44,6 +45,9 @@ nonisolated struct SSEMessageUpdate {
         self.modelID = StreamDisplayValue.preview(decodedInfo?.modelID ?? info["modelID"] as? String, maximumBytes: 160)
         self.providerID = StreamDisplayValue.preview(decodedInfo?.providerID ?? info["providerID"] as? String, maximumBytes: 160)
         self.finish = StreamDisplayValue.preview(decodedInfo?.finish ?? info["finish"] as? String, maximumBytes: 80)
+        self.parentID = (decodedInfo?.parentID ?? info["parentID"] as? String).flatMap {
+            StreamDisplayValue.fitsIdentifier($0) ? $0 : nil
+        }
     }
 }
 
@@ -91,7 +95,7 @@ nonisolated struct SSESessionUpdate {
 
         self.sessionID = sessionID
         self.presentFields = Set(info.keys).intersection(Set([
-            "projectID", "directory", "parentID", "title", "version", "time", "share",
+            "projectID", "directory", "parentID", "title", "version", "time", "share", "revert",
         ]))
         self.update = SSEPreparedPayload.decode(OCSession.self, from: info).map(Self.boundedSession)
         self.title = StreamDisplayValue.preview(info["title"] as? String, maximumBytes: 512)
@@ -108,6 +112,11 @@ nonisolated struct SSESessionUpdate {
             time: session.time,
             share: session.share.map {
                 OCShareInfo(url: StreamDisplayValue.preview($0.url, maximumBytes: 2_048))
+            },
+            revert: session.revert.flatMap {
+                guard StreamDisplayValue.fitsIdentifier($0.messageID),
+                      $0.partID == nil || StreamDisplayValue.fitsIdentifier($0.partID) else { return nil }
+                return OCSessionRevert(messageID: $0.messageID, partID: $0.partID)
             }
         )
     }

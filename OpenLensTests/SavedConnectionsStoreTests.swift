@@ -139,6 +139,96 @@ struct SavedConnectionsStoreTests {
         ])
     }
 
+    @Test func remembersRecentModelSelectionsNewestFirstAndDeduplicated() {
+        let store = SavedConnectionsStore(initialConnections: [])
+        let connection = store.saveConnection(
+            serverURL: "http://192.168.1.50:4096",
+            username: "opencode",
+            password: ""
+        )
+
+        store.updateModelSelection(
+            connectionID: connection.id,
+            providerID: "anthropic",
+            modelID: "claude-sonnet",
+            variant: nil
+        )
+        store.updateModelSelection(
+            connectionID: connection.id,
+            providerID: "openai",
+            modelID: "gpt-5",
+            variant: nil
+        )
+        store.updateModelSelection(
+            connectionID: connection.id,
+            providerID: "anthropic",
+            modelID: "claude-sonnet",
+            variant: "high"
+        )
+
+        #expect(store.recentModelSelections(connectionID: connection.id).map(\.id) == [
+            "anthropic/claude-sonnet",
+            "openai/gpt-5",
+        ])
+    }
+
+    @Test func recentModelSelectionsIncludesCurrentSelectionFromBeforeHistory() {
+        let connection = SavedConnection(
+            id: "legacy-model-selection",
+            serverURL: "http://192.168.1.50:4096",
+            username: "opencode",
+            password: "",
+            selectedProviderID: "anthropic",
+            selectedModelID: "claude-sonnet"
+        )
+        let store = SavedConnectionsStore(initialConnections: [connection])
+
+        #expect(store.recentModelSelections(connectionID: connection.id).map(\.id) == [
+            "anthropic/claude-sonnet",
+        ])
+    }
+
+    @Test func persistsGlobalQuickModelAssignmentsWithVariants() {
+        let suiteName = "OpenLensTests.quick-model-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let assignments: [ModelQuickAction: QuickModelAssignment] = [
+            .code: QuickModelAssignment(
+                providerID: "anthropic",
+                modelID: "claude-sonnet",
+                variant: "high"
+            ),
+            .review: QuickModelAssignment(providerID: "openai", modelID: "gpt-5"),
+        ]
+
+        AppPreferences.saveQuickModelAssignments(assignments, userDefaults: defaults)
+
+        #expect(AppPreferences.quickModelAssignments(userDefaults: defaults) == assignments)
+    }
+
+    @Test func publicSnapshotFallbackRestoresRecentModelSelections() {
+        let selections = [
+            SavedModelSelection(providerID: "openai", modelID: "gpt-5"),
+            SavedModelSelection(providerID: "anthropic", modelID: "claude-sonnet"),
+        ]
+        let connection = SavedConnection(
+            id: "model-history",
+            serverURL: "http://192.168.1.50:4096",
+            username: "opencode",
+            password: "secret",
+            recentModelSelections: selections,
+            lastConnectedAt: Date(timeIntervalSince1970: 10)
+        )
+
+        let restored = SavedConnectionsStore.mergeKeychainConnections(
+            [],
+            withPublicSnapshots: [SavedConnectionPublicSnapshot(connection: connection)]
+        )
+
+        #expect(restored.first?.recentModelSelections == selections)
+    }
+
     @Test func publicSnapshotFallbackRestoresRecentProjectDirectories() {
         let snapshots = [
             SavedConnectionPublicSnapshot(connection: SavedConnection(

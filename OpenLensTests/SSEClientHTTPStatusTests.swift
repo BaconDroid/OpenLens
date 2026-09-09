@@ -59,7 +59,8 @@ struct SSEClientHTTPStatusTests {
                     "cost": 0.42,
                     "modelID": "model",
                     "providerID": "provider",
-                    "finish": "stop"
+                    "finish": "stop",
+                    "parentID": "user-message"
                 ]
             ])
         )
@@ -78,6 +79,7 @@ struct SSEClientHTTPStatusTests {
         #expect(update.modelID == "model")
         #expect(update.providerID == "provider")
         #expect(update.finish == "stop")
+        #expect(update.parentID == "user-message")
         #expect(rawEvent?.type == "message.updated")
     }
 

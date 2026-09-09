@@ -32,6 +32,14 @@ struct ChatView: View {
     @State private var displayedResponseState: ChatResponseState = .idle
     @State private var isComposerExpanded = false
 
+    private static let undoSlashAction = WorkspaceSlashActionItem(
+        kind: .command,
+        token: "undo",
+        title: "Undo last message",
+        description: "Revert the latest user message and its later work.",
+        prompt: "/undo"
+    )
+
     var body: some View {
         VStack(spacing: 0) {
             ChatMessagesListView(
@@ -133,26 +141,10 @@ struct ChatView: View {
         // MARK: - Sheets
 
         .sheet(isPresented: $chatClient.showActivityCard) {
-            if let activity = chatClient.currentActivity ?? chatClient.lastCompletedActivity {
-                AgentActivityCard(activity: activity)
-                    .presentationDetents([.medium, .large])
-            }
+            activityCardSheet
         }
         .sheet(isPresented: $showModelPicker) {
-            ModelPickerView(
-                models: chatClient.availableModels,
-                selectedProviderID: chatClient.selectedProviderID,
-                selectedModelID: chatClient.selectedModelID,
-                isLoading: chatClient.isLoadingProviders,
-                defaultModelSelection: chatClient.defaultModelSelection,
-                visualMode: visualMode
-            ) { model in
-                chatClient.selectModel(model)
-                showModelPicker = false
-            } onToggleDefault: { model in
-                chatClient.toggleDefaultModel(model)
-            }
-            .presentationDetents([.medium])
+            modelPickerSheet
         }
         .sheet(isPresented: $showContextStatus) {
             if let contextUsage = chatClient.contextUsageSummary {
@@ -386,6 +378,71 @@ struct ChatView: View {
         }
     }
 
+    @ViewBuilder
+    private var activityCardSheet: some View {
+        if let activity = chatClient.currentActivity ?? chatClient.lastCompletedActivity {
+            AgentActivityCard(activity: activity)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var modelPickerSheet: some View {
+        ModelPickerView(
+            models: chatClient.availableModels,
+            selectedProviderID: chatClient.selectedProviderID,
+            selectedModelID: chatClient.selectedModelID,
+            isLoading: chatClient.isLoadingProviders,
+            defaultModelSelection: chatClient.defaultModelSelection,
+            recentModelIDs: chatClient.recentModelIDs,
+            quickModelAssignments: chatClient.quickModelAssignments,
+            visualMode: visualMode,
+            onSelect: { model in handleModelPickerSelection(model) },
+            onToggleDefault: { model in handleModelPickerDefaultToggle(model) },
+            onActivateQuickAction: { action in handleQuickActionActivation(action) },
+            onAssignQuickModel: { action, model, variant in
+                handleQuickModelAssignment(action, model: model, variant: variant)
+            },
+            onChangeQuickVariant: { action, variant in
+                handleQuickVariantChange(action, variant: variant)
+            },
+            onClearQuickModel: { action in handleQuickModelClear(action) }
+        )
+        .presentationDetents([.medium])
+    }
+
+    private func handleModelPickerSelection(_ model: ChatClient.SelectableModel) {
+        chatClient.selectModel(model)
+        showModelPicker = false
+    }
+
+    private func handleModelPickerDefaultToggle(_ model: ChatClient.SelectableModel) {
+        chatClient.toggleDefaultModel(model)
+    }
+
+    private func handleQuickActionActivation(_ action: ModelQuickAction) {
+        if chatClient.selectQuickModelAction(action) {
+            showModelPicker = false
+        }
+    }
+
+    private func handleQuickModelAssignment(
+        _ action: ModelQuickAction,
+        model: ChatClient.SelectableModel,
+        variant: String?
+    ) {
+        chatClient.assignQuickModel(model, variant: variant, for: action)
+        showModelPicker = false
+    }
+
+    private func handleQuickVariantChange(_ action: ModelQuickAction, variant: String?) {
+        chatClient.updateQuickModelVariant(for: action, variantID: variant)
+        showModelPicker = false
+    }
+
+    private func handleQuickModelClear(_ action: ModelQuickAction) {
+        chatClient.clearQuickModelAssignment(for: action)
+    }
+
     private func todoColor(for status: String) -> Color {
         switch status {
         case "completed": isRetroChat ? RetroChatStyle.blueAccent : .green
@@ -412,7 +469,7 @@ struct ChatView: View {
     private var modelSelectionRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
             ViewThatFits {
-                HStack {
+                HStack(spacing: 6) {
                     modelSelectorButton
 
                     if chatClient.showsThinkingEffortPicker {
@@ -420,7 +477,7 @@ struct ChatView: View {
                     }
                 }
 
-                VStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 6) {
                     modelSelectorButton
 
                     if chatClient.showsThinkingEffortPicker {
@@ -526,11 +583,14 @@ struct ChatView: View {
                         selectedSlashActionChip(selectedSlashAction)
                     }
 
-                    TextField(composerPlaceholder, text: $chatClient.inputText, axis: .vertical)
-                        .focused($isInputFocused)
-                        .onTapGesture {
-                            setComposerExpanded(true)
-                        }
+                     TextField(composerPlaceholder, text: $chatClient.inputText, axis: .vertical)
+                         .focused($isInputFocused)
+                         .onSubmit {
+                             performComposerAction()
+                         }
+                         .onTapGesture {
+                             setComposerExpanded(true)
+                         }
                         .lineLimit(1 ... 5)
                         .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
                         .foregroundStyle(primaryTextColor)
@@ -555,6 +615,7 @@ struct ChatView: View {
         } label: {
             composerActionButtonLabel
                 .animation(.spring(duration: 0.25), value: chatClient.isLoading)
+                .animation(.spring(duration: 0.25), value: chatClient.isQueueingPrompt)
         }
         .disabled(isComposerActionDisabled)
         .accessibilityLabel(composerActionAccessibilityLabel)
@@ -606,7 +667,19 @@ struct ChatView: View {
 
     @ViewBuilder
     private var composerActionButtonLabel: some View {
-        if chatClient.isLoading {
+        if chatClient.isQueueingPrompt {
+            ZStack {
+                Circle()
+                    .fill(isRetroChat ? RetroChatStyle.ink : Color.appAccent)
+
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(isRetroChat ? RetroChatStyle.paper : Color.appOnAccent)
+            }
+            .frame(width: 32, height: 32)
+            .contentShape(Circle())
+            .transition(.scale(scale: 0.7).combined(with: .opacity))
+        } else if chatClient.isLoading && !hasComposerText {
             ZStack {
                 Circle()
                     .fill(isRetroChat ? RetroChatStyle.danger : Color.red)
@@ -625,7 +698,7 @@ struct ChatView: View {
             .contentShape(Circle())
             .transition(.scale(scale: 0.7).combined(with: .opacity))
         } else {
-            Image(systemName: "arrow.up.circle.fill")
+            Image(systemName: chatClient.isLoading ? "arrow.uturn.up.circle.fill" : "arrow.up.circle.fill")
                 .font(.system(size: isRetroChat ? 28 : 30, weight: isRetroChat ? .bold : .regular))
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(
@@ -639,30 +712,48 @@ struct ChatView: View {
     }
 
     private var isComposerActionDisabled: Bool {
-        chatClient.isLoading ? chatClient.isStoppingResponse : !canSend
+        if chatClient.isQueueingPrompt {
+            return true
+        }
+
+        if hasComposerText {
+            return chatClient.isLoading ? !canQueuePrompt : !canSend
+        }
+
+        return chatClient.isLoading ? chatClient.isStoppingResponse : true
     }
 
     private var composerActionAccessibilityLabel: String {
+        if chatClient.isQueueingPrompt {
+            return AppText.queuePromptSubmitting
+        }
+
         if chatClient.isStoppingResponse {
             return AppText.responseStopping
         }
 
-        return chatClient.isLoading ? "Stop" : "Send"
+        if chatClient.isLoading {
+            return hasComposerText ? AppText.queuePrompt : "Stop"
+        }
+
+        return "Send"
     }
 
     private func performComposerAction() {
-        collapseComposerFocus()
-
-        if chatClient.isLoading {
+        if chatClient.isLoading && hasComposerText {
+            sendComposerInput()
+        } else if chatClient.isLoading {
+            collapseComposerFocus()
             chatClient.abort()
         } else {
+            collapseComposerFocus()
             sendComposerInput()
         }
     }
 
     private func sendComposerInput() {
         guard let selectedSlashAction else {
-            chatClient.send()
+            sendCurrentComposerInput()
             return
         }
 
@@ -671,7 +762,15 @@ struct ChatView: View {
 
         chatClient.inputText = composedText
         self.selectedSlashAction = nil
-        chatClient.send()
+        sendCurrentComposerInput()
+    }
+
+    private func sendCurrentComposerInput() {
+        if chatClient.isLoading {
+            chatClient.queuePrompt()
+        } else {
+            chatClient.send()
+        }
     }
 
     private func composedSlashActionText(for action: WorkspaceSlashActionItem) -> String {
@@ -837,11 +936,26 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !composerSendText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        hasComposerText &&
             !chatClient.isLoading &&
+            !chatClient.isQueueingPrompt &&
             chatClient.currentSession != nil &&
             chatClient.pendingQuestion == nil &&
             chatClient.canCompose
+    }
+
+    private var canQueuePrompt: Bool {
+        hasComposerText &&
+            chatClient.isLoading &&
+            !chatClient.isStoppingResponse &&
+            !chatClient.isQueueingPrompt &&
+            chatClient.currentSession != nil &&
+            chatClient.pendingQuestion == nil &&
+            chatClient.canCompose
+    }
+
+    private var hasComposerText: Bool {
+        !composerSendText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var composerSendText: String {
@@ -887,7 +1001,8 @@ struct ChatView: View {
         guard !isLoadingCommands else { return }
 
         isLoadingCommands = true
-        let slashActions = await workspaceService.loadSlashActions()
+        let workspaceSlashActions = await workspaceService.loadSlashActions()
+        let slashActions = [Self.undoSlashAction] + workspaceSlashActions
         availableSlashActions = slashActions
         chatClient.updateSlashCatalog(
             commands: slashActions.filter { $0.kind == .command }.map(\.token),
@@ -937,6 +1052,8 @@ struct ChatView: View {
         }
 
         switch action.token.lowercased() {
+        case "undo":
+            return "arrow.uturn.backward"
         case let id where id.contains("review"):
             return "ladybug"
         case let id where id.contains("status"):
@@ -949,11 +1066,10 @@ struct ChatView: View {
             return "command"
         }
     }
-
 }
 
 struct PermissionRequestSheet: View {
-    static let defaultPresentationDetent: PresentationDetent = .height(390)
+    static let defaultPresentationDetent: PresentationDetent = .fraction(0.5)
 
     let permission: OCPermissionRequest
     @Binding var selectedDetent: PresentationDetent
@@ -1104,23 +1220,15 @@ struct PermissionRequestSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SurfaceCard(padding: 0, cornerRadius: 24) {
-                VStack(alignment: .leading, spacing: 18) {
-                    if confirmsAllowAll && canOfferAllowAll {
-                        allowAllConfirmation
-                    } else {
-                        permissionRequest
-                    }
-                }
-                .padding(20)
-                .animation(.snappy(duration: 0.2), value: confirmsAllowAll)
+        VStack(alignment: .leading, spacing: 16) {
+            if confirmsAllowAll && canOfferAllowAll {
+                allowAllConfirmation
+            } else {
+                permissionRequest
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 8)
-        .padding(.bottom, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding()
+        .animation(.snappy(duration: 0.2), value: confirmsAllowAll)
         .background(Color.appBackground)
         .onAppear {
             if initiallyConfirmsAllowAll && canOfferAllowAll {
@@ -1138,10 +1246,10 @@ struct PermissionRequestSheet: View {
                     .font(.system(size: 14))
                     .foregroundStyle(Color.appSecondary)
                     .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             metadata
+            Spacer()
             actions
         }
     }
@@ -1448,6 +1556,63 @@ struct PermissionRequestSheet: View {
 
         guard hiddenCount > 0 else { return visiblePrefix }
         return "\(visiblePrefix) +\(hiddenCount)"
+    }
+}
+
+#Preview("Permission request") {
+    PermissionRequestSheetPreviewHost()
+}
+
+#Preview("Always allow confirmation") {
+    PermissionRequestSheetPreviewHost(initiallyConfirmsAllowAll: true)
+}
+
+private struct PermissionRequestSheetPreviewHost: View {
+    @State private var isPresented = true
+    @State private var chatClient = ChatClient(demoMode: true)
+    @State private var connection = ConnectionManager()
+    @State private var selectedDetent = PermissionRequestSheet.defaultPresentationDetent
+
+    private let initiallyConfirmsAllowAll: Bool
+
+    private let permission = OCPermissionRequest(
+        id: "preview-permission",
+        permission: "bash",
+        patterns: ["git push origin feature/app-store-assets"],
+        always: ["*"],
+        description: "Push the screenshot branch to origin.",
+        title: "Permission required",
+        toolName: "bash"
+    )
+
+    init(initiallyConfirmsAllowAll: Bool = false) {
+        self.initiallyConfirmsAllowAll = initiallyConfirmsAllowAll
+    }
+
+    var body: some View {
+        NavigationStack {
+            ChatView(chatClient: chatClient)
+        }
+        .environment(\.connection, connection)
+        .task {
+            connection.configureDemoState(projectName: "OpenLens", branch: "feature/permissions")
+        }
+        .sheet(isPresented: $isPresented) {
+            PermissionRequestSheet(
+                permission: permission,
+                selectedDetent: $selectedDetent,
+                initiallyConfirmsAllowAll: initiallyConfirmsAllowAll,
+                onRespond: { _ in false }
+            )
+            .presentationDetents(
+                PermissionRequestSheet.presentationDetents(for: permission),
+                selection: $selectedDetent
+            )
+            .presentationBackground(Color.appBackground)
+            .presentationContentInteraction(.resizes)
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
     }
 }
 
@@ -1905,8 +2070,17 @@ private struct ChatMessagesListView: View {
                         ForEach(timelineItems) { item in
                             timelineRow(item)
                         }
+
+                        ForEach(Array(chatClient.queuedPrompts.enumerated()), id: \.element.id) { index, prompt in
+                            QueuedPromptBubbleView(
+                                prompt: prompt,
+                                position: index + 1
+                            )
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
                     }
                     .padding(.horizontal, isRetroChat ? 12 : 16)
+                    .animation(.easeOut(duration: 0.22), value: chatClient.queuedPrompts)
 
                     Color.clear
                         .frame(height: 17)
@@ -2033,6 +2207,8 @@ private struct ChatMessagesListView: View {
                 assistantSegments: [],
                 streamingText: projection
             )
+        case .turnFileChanges(let message):
+            TurnFileChangesTimelineRow(chatClient: chatClient, message: message)
         }
     }
 
@@ -2176,6 +2352,87 @@ private struct ChatMessagesListView: View {
             followLatest: followLatest,
             isPastVisibilityThreshold: scrollState.isPastVisibilityThreshold
         )
+    }
+}
+
+private struct QueuedPromptBubbleView: View {
+    let prompt: QueuedPrompt
+    let position: Int
+
+    @Environment(\.openLensTheme) private var theme
+    @Environment(\.chatEasterEgg) private var chatEasterEgg
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: isRetroChat ? 6 : 8) {
+            Spacer(minLength: isRetroChat ? 42 : 64)
+
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(prompt.text)
+                    .font(isRetroChat ? RetroChatStyle.bodyFont : .system(size: 16))
+                    .foregroundStyle(isRetroChat ? RetroChatStyle.ink : Color.appPrimary)
+                    .padding(.horizontal, isRetroChat ? 14 : 16)
+                    .padding(.vertical, isRetroChat ? 10 : 11)
+                    .background {
+                        RoundedRectangle(cornerRadius: isRetroChat ? 7 : theme.radius.card, style: .continuous)
+                            .fill(isRetroChat ? RetroChatStyle.paperWarm : Color.appAccent.opacity(0.10))
+                            .shadow(
+                                color: isRetroChat ? RetroChatStyle.shadow : .clear,
+                                radius: 0,
+                                x: isRetroChat ? 3 : 0,
+                                y: isRetroChat ? 3 : 0
+                            )
+                    }
+                    .overlay {
+                        if isRetroChat {
+                            RetroChatDoubleBorder(cornerRadius: 7)
+                        } else {
+                            RoundedRectangle(cornerRadius: theme.radius.card, style: .continuous)
+                                .strokeBorder(
+                                    Color.appAccent.opacity(0.48),
+                                    style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                                )
+                        }
+                    }
+
+                HStack(spacing: 5) {
+                    statusIcon
+                    Text(statusText)
+                }
+                .font(isRetroChat ? RetroChatStyle.smallFont : .system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(isRetroChat ? RetroChatStyle.magentaAccent : Color.appAccent)
+                .padding(.trailing, 4)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(statusText). \(prompt.text)")
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch prompt.state {
+        case .submitting:
+            ProgressView()
+                .controlSize(.mini)
+                .tint(isRetroChat ? RetroChatStyle.magentaAccent : Color.appAccent)
+        case .queued:
+            Image(systemName: "clock.fill")
+                .font(.system(size: 10, weight: .semibold))
+        }
+    }
+
+    private var statusText: String {
+        switch prompt.state {
+        case .submitting:
+            AppText.queuePromptSubmitting
+        case .queued where position == 1:
+            "\(AppText.queuePromptQueued) · \(AppText.queuePromptRunsNext)"
+        case .queued:
+            "\(AppText.queuePromptQueued) · \(AppText.queuePromptPosition(position))"
+        }
+    }
+
+    private var isRetroChat: Bool {
+        chatEasterEgg.visualMode.isRetro
     }
 }
 
@@ -2387,8 +2644,8 @@ enum ChatScrollPolicy {
         guard isLoading,
               followLatest,
               interaction.allowsProgrammaticScroll,
-              (bottomDistance > settledBottomTolerance
-                || bottomOverscroll > settledBottomTolerance),
+              bottomDistance > settledBottomTolerance
+              || bottomOverscroll > settledBottomTolerance,
               contentVersion != lastHandledContentVersion else { return false }
         return now.timeIntervalSince(lastAutoScrollDate) >= minimumInterval
     }

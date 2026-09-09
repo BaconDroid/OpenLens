@@ -40,7 +40,7 @@ final class ReviewService {
             throw OpenCodeError.notConnected
         }
 
-        let _ = try await client.revertMessage(sessionID: sessionID, messageID: messageID)
+        _ = try await client.revertMessage(sessionID: sessionID, messageID: messageID)
     }
 
     private func loadChangeSets(sessionID: String, messages: [OCMessageWithParts]) async throws -> [ReviewChangeSet] {

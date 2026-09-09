@@ -81,6 +81,7 @@ struct SettingsView: View {
                         isPresented: $showDisconnectConfirmation
                     ) {
                         Button(AppText.disconnect, role: .destructive) {
+                            liveActivity.dismissImmediately()
                             connection.manualDisconnect()
                         }
                         Button(AppText.done, role: .cancel) {}
@@ -293,14 +294,30 @@ struct SettingsView: View {
             VStack(spacing: 8) {
                 SectionLabel(text: AppText.developer)
 
-                settingsPanel {
-                    settingsToggleRow(
+                 settingsPanel {
+                     settingsToggleRow(
                         icon: "wrench.and.screwdriver",
                         title: AppText.settingsDebugFeatures,
                         subtitle: AppText.settingsDebugFeaturesSubtitle,
-                        isOn: $debugFeaturesEnabled
-                    )
-                }
+                         isOn: $debugFeaturesEnabled
+                     )
+
+                     if debugFeaturesEnabled {
+                         actionRow(
+                             icon: "waveform.path.ecg",
+                             title: AppText.settingsLiveActivityDebugTitle
+                         ) {
+                             liveActivity.previewLiveActivity()
+                         }
+
+                         actionRow(
+                             icon: "xmark.circle",
+                             title: AppText.settingsLiveActivityDismissTitle
+                         ) {
+                             liveActivity.dismissImmediately()
+                         }
+                     }
+                 }
             }
         }
     #endif

@@ -540,6 +540,8 @@ final class ChatMessage: Identifiable {
     var modelID: String?
     var providerID: String?
     var finish: String?
+    private(set) var parentUserMessageID: String?
+    private(set) var turnFileChanges: [TurnFileChangeSummary]
 
     let streamingTextProjection: StreamingTextProjection
     /// Compatibility text without a server `partID` is represented as one
@@ -572,7 +574,9 @@ final class ChatMessage: Identifiable {
         tokens: OCTokenUsage? = nil,
         modelID: String? = nil,
         providerID: String? = nil,
-        finish: String? = nil
+        finish: String? = nil,
+        parentUserMessageID: String? = nil,
+        turnFileChanges: [TurnFileChangeSummary] = []
     ) {
         self.id = id
         self.role = role
@@ -586,6 +590,10 @@ final class ChatMessage: Identifiable {
         self.modelID = modelID
         self.providerID = providerID
         self.finish = finish
+        self.parentUserMessageID = parentUserMessageID
+        self.turnFileChanges = turnFileChanges.sorted { lhs, rhs in
+            lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+        }
         _ = discardPermanentlyNonRenderableStreamingPartsIfNeeded()
         trimActivityPartsIfNeeded()
         trimReasoningPartsIfNeeded()
@@ -594,6 +602,19 @@ final class ChatMessage: Identifiable {
             streamingTextProjection.replace(with: content)
         }
         rebuildDerivedState()
+    }
+
+    func setParentUserMessageID(_ messageID: String?) {
+        guard let messageID = messageID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank else {
+            return
+        }
+        parentUserMessageID = messageID
+    }
+
+    func setTurnFileChanges(_ files: [TurnFileChangeSummary]) {
+        turnFileChanges = files.sorted { lhs, rhs in
+            lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+        }
     }
 
     /// Display-friendly model name for assistant messages.
@@ -762,6 +783,10 @@ final class ChatMessage: Identifiable {
         modelID = snapshot.modelID ?? modelID
         providerID = snapshot.providerID ?? providerID
         finish = snapshot.finish ?? finish
+        parentUserMessageID = snapshot.parentUserMessageID ?? parentUserMessageID
+        if turnFileChanges.isEmpty, !snapshot.turnFileChanges.isEmpty {
+            turnFileChanges = snapshot.turnFileChanges
+        }
     }
 
     func replaceStreamingText(with text: String, chunks: [String]? = nil) {
@@ -2244,6 +2269,7 @@ struct ChatTimelineItem: Identifiable {
             message: ChatMessage,
             projection: ChatMessage.StreamingTextProjection
         )
+        case turnFileChanges(message: ChatMessage)
     }
 
     let id: String
@@ -2317,6 +2343,14 @@ enum ChatTimeline {
                             message: message,
                             projection: message.streamingTextProjection
                         )
+                    )
+                )
+            }
+            if !message.isStreaming, !message.turnFileChanges.isEmpty {
+                items.append(
+                    ChatTimelineItem(
+                        id: "message-\(message.id)-turn-file-changes",
+                        content: .turnFileChanges(message: message)
                     )
                 )
             }

@@ -202,6 +202,40 @@ struct ReviewFileChange: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Lightweight, immutable metadata retained by a chat turn.
+///
+/// Full before/after contents are deliberately loaded on demand so a long
+/// transcript does not retain every historical file body in memory.
+struct TurnFileChangeSummary: Identifiable, Hashable, Sendable {
+    let path: String
+    let status: String
+    let additions: Int
+    let deletions: Int
+
+    var id: String { path }
+
+    var filename: String {
+        let candidate = (path as NSString).lastPathComponent
+        return candidate.isEmpty ? path : candidate
+    }
+
+    init(path: String, status: String, additions: Int, deletions: Int) {
+        self.path = path
+        self.status = status
+        self.additions = additions
+        self.deletions = deletions
+    }
+
+    init(file: ReviewFileChange) {
+        self.init(
+            path: file.path,
+            status: file.status,
+            additions: file.additions,
+            deletions: file.deletions
+        )
+    }
+}
+
 struct ReviewChangeSet: Identifiable, Hashable, Sendable {
     let id: String
     let title: String

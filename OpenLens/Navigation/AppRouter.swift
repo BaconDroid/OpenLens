@@ -4,13 +4,21 @@ import Foundation
 final class AppRouter {
     var selectedTab: AppTab = .chat
     var chatPath: [RouterDestination] = []
+    var microPath: [RouterDestination] = []
     var reviewPath: [RouterDestination] = []
     var workspacePath: [RouterDestination] = []
     var settingsPath: [RouterDestination] = []
 
+    var selectedChatSessionID: String? {
+        guard let firstDestination = chatPath.first,
+              case .chatSession(let session) = firstDestination else { return nil }
+        return session.id
+    }
+
     func path(for tab: AppTab) -> [RouterDestination] {
         switch tab {
         case .chat: chatPath
+        case .micro: microPath
         case .review: reviewPath
         case .workspace: workspacePath
         case .settings: settingsPath
@@ -21,6 +29,8 @@ final class AppRouter {
         switch tab {
         case .chat:
             chatPath = path
+        case .micro:
+            microPath = path
         case .review:
             reviewPath = path
         case .workspace:
@@ -36,5 +46,15 @@ final class AppRouter {
         path.append(destination)
         setPath(path, for: targetTab)
         selectedTab = targetTab
+    }
+
+    func selectChatSession(_ session: OCSession) {
+        chatPath = [.chatSession(session: session)]
+        selectedTab = .chat
+    }
+
+    func clearChatSession(ifMatching sessionID: String) {
+        guard selectedChatSessionID == sessionID else { return }
+        chatPath = []
     }
 }

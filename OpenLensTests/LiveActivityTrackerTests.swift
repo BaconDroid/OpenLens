@@ -133,5 +133,7 @@ private final class LiveActivitySpy: LiveActivityProviding {
 
     func endActivity(completionSummary: String?) {}
 
+    func dismissImmediately() {}
+
     func previewLiveActivity() {}
 }

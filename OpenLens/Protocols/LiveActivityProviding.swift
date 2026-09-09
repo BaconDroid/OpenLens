@@ -17,5 +17,6 @@ protocol LiveActivityProviding: AnyObject {
         pendingUserResponse: OpenLensActivityAttributes.PendingUserResponse?
     )
     func endActivity(completionSummary: String?)
+    func dismissImmediately()
     func previewLiveActivity()
 }

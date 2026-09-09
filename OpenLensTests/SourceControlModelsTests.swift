@@ -260,4 +260,18 @@ struct SourceControlModelsTests {
         #expect(FileDiffDetailView.preferredDisplayMode(for: detail) == .changed)
         #expect(FileDiffDetailView.availableModes(for: detail) == [.changed])
     }
+
+    @Test func turnFileSummaryKeepsHiddenPathButDisplaysOnlyBasename() {
+        let summary = TurnFileChangeSummary(
+            path: "OpenLens/Views/Chat/ChatView.swift",
+            status: "M",
+            additions: 24,
+            deletions: 7
+        )
+
+        #expect(summary.path == "OpenLens/Views/Chat/ChatView.swift")
+        #expect(summary.filename == "ChatView.swift")
+        #expect(summary.additions == 24)
+        #expect(summary.deletions == 7)
+    }
 }

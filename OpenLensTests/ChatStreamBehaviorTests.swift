@@ -3585,6 +3585,51 @@ struct ChatStreamBehaviorTests {
     }
 
     @MainActor
+    @Test func timelineShowsSortedTurnFilesOnlyAfterAssistantCompletes() {
+        let message = ChatMessage(
+            id: "assistant-message",
+            role: .assistant,
+            content: "",
+            isStreaming: true,
+            parentUserMessageID: "user-message",
+            turnFileChanges: [
+                TurnFileChangeSummary(path: "Sources/Zeta.swift", status: "M", additions: 3, deletions: 1),
+                TurnFileChangeSummary(path: "Sources/Alpha.swift", status: "A", additions: 8, deletions: 0)
+            ]
+        )
+
+        let streamingItems = ChatTimeline.items(from: [message], showsThinking: false)
+        #expect(!streamingItems.contains { item in
+            if case .turnFileChanges = item.content { return true }
+            return false
+        })
+
+        message.isStreaming = false
+        let completedItems = ChatTimeline.items(from: [message], showsThinking: false)
+
+        #expect(completedItems.map(\.id) == ["message-assistant-message-turn-file-changes"])
+        #expect(message.turnFileChanges.map(\.path) == ["Sources/Alpha.swift", "Sources/Zeta.swift"])
+        guard case .turnFileChanges(let owningMessage) = completedItems[0].content else {
+            Issue.record("Expected an immutable turn-file row")
+            return
+        }
+        #expect(owningMessage === message)
+    }
+
+    @MainActor
+    @Test func timelineShowsNothingForCompletedAssistantWithoutFileChanges() {
+        let message = ChatMessage(
+            id: "assistant-message",
+            role: .assistant,
+            content: "",
+            isStreaming: false,
+            parentUserMessageID: "user-message"
+        )
+
+        #expect(ChatTimeline.items(from: [message], showsThinking: false).isEmpty)
+    }
+
+    @MainActor
     @Test func timelinePaginatesParentsBeforeFlatteningParts() {
         let client = ChatClient(demoMode: true)
         let older = ChatMessage(
@@ -4174,6 +4219,12 @@ struct ChatStreamBehaviorTests {
                 VisibleTranscriptRow(id: item.id, kind: "message", value: message.content)
             case .streamingAssistantText(_, let projection):
                 VisibleTranscriptRow(id: item.id, kind: "text", value: projection.copyText())
+            case .turnFileChanges(let message):
+                VisibleTranscriptRow(
+                    id: item.id,
+                    kind: "files",
+                    value: message.turnFileChanges.map(\.path).joined(separator: ",")
+                )
             case .assistantSegment(_, let segment):
                 switch segment.kind {
                 case .text(let text):
@@ -4494,6 +4545,8 @@ private final class TestLiveActivityProvider: LiveActivityProviding {
     ) {}
 
     func endActivity(completionSummary: String?) {}
+
+    func dismissImmediately() {}
 
     func previewLiveActivity() {}
 }

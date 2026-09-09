@@ -10,6 +10,23 @@ enum ChatResponseState: Equatable {
     case failed
 }
 
+struct QueuedPrompt: Identifiable, Equatable {
+    enum State: Equatable {
+        case submitting
+        case queued
+    }
+
+    let id: UUID
+    let text: String
+    var state: State
+
+    init(id: UUID = UUID(), text: String, state: State) {
+        self.id = id
+        self.text = text
+        self.state = state
+    }
+}
+
 /// Thin coordinator for the chat interface.
 /// Delegates all IO to domain services (MessagesService, ProvidersService,
 /// QuestionService, SessionsService). Keeps UI state and orchestration only.
@@ -32,6 +49,13 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
     var inputText: String = ""
     var isLoading: Bool = false
+    /// True while a follow-up is being admitted to the server-side turn queue.
+    var isQueueingPrompt: Bool = false
+    /// Follow-ups that were admitted behind the active turn but have not been
+    /// promoted into the visible transcript yet.
+    var queuedPrompts: [QueuedPrompt] = []
+    /// True while OpenCode is reverting a selected user message.
+    var isUndoingMessage: Bool = false
     var responseState: ChatResponseState = .idle
     var errorMessage: String?
 
@@ -108,6 +132,9 @@ final class ChatClient: SSEEventHandlerDelegate {
     private var preferredDefaultModelID: String = ""
     private var serverReportedDefault: (providerID: String, modelID: String)?
     private var configReportedDefault: (providerID: String, modelID: String)?
+    private var inMemoryRecentModelIDs: [String] = []
+    private var globalQuickModelAssignments: [ModelQuickAction: QuickModelAssignment] = AppPreferences.quickModelAssignments()
+    var quickModelAssignmentsVersion: UInt = 0
 
     /// Provider filter lists from server config (enabled_providers / disabled_providers).
     private var enabledProviders: [String]? {
@@ -193,9 +220,16 @@ final class ChatClient: SSEEventHandlerDelegate {
     }
 
     private func persistCurrentSelection() {
-        guard let connID = savedConnectionsStore?.activeConnectionID,
-              !selectedProviderID.isEmpty,
-              !selectedModelID.isEmpty else { return }
+        guard !selectedProviderID.isEmpty, !selectedModelID.isEmpty else { return }
+
+        let selectionID = "\(selectedProviderID)/\(selectedModelID)"
+        guard let connID = savedConnectionsStore?.activeConnectionID else {
+            guard isDemoMode else { return }
+            inMemoryRecentModelIDs.removeAll { $0 == selectionID }
+            inMemoryRecentModelIDs.insert(selectionID, at: 0)
+            inMemoryRecentModelIDs = Array(inMemoryRecentModelIDs.prefix(5))
+            return
+        }
 
         savedConnectionsStore?.updateModelSelection(
             connectionID: connID,
@@ -337,7 +371,121 @@ final class ChatClient: SSEEventHandlerDelegate {
         if !selectedModelID.isEmpty {
             return selectedModelID
         }
-        return "Choose model"
+        return AppText.chooseModel
+    }
+
+    var recentModelIDs: [String] {
+        guard let savedConnectionsStore, let connectionID = quickModelConnectionID else {
+            return inMemoryRecentModelIDs
+        }
+        return savedConnectionsStore.recentModelSelections(connectionID: connectionID).map(\.id)
+    }
+
+    /// Models assigned to the global Code and Review quick actions.
+    /// A revision counter keeps views that read the persisted preferences up
+    /// to date after an assignment changes.
+    var quickModelAssignments: [ModelQuickAction: QuickModelAssignment] {
+        _ = quickModelAssignmentsVersion
+        return globalQuickModelAssignments
+    }
+
+    func quickModelAssignment(for action: ModelQuickAction) -> QuickModelAssignment? {
+        quickModelAssignments[action]
+    }
+
+    private var quickModelConnectionID: String? {
+        guard let savedConnectionsStore else { return nil }
+        return savedConnectionsStore.activeConnectionID ?? savedConnectionsStore.mostRecent?.id
+    }
+
+    /// Saves a model and optional reasoning variant for a quick action without
+    /// changing the active session model.
+    func assignQuickModel(
+        _ model: SelectableModel,
+        variant: String?,
+        for action: ModelQuickAction
+    ) {
+        let validVariant = variant.flatMap { variantID in
+            model.variants.contains(where: {
+                $0.id == variantID && $0.value.isThinkingEffortVariant
+            }) ? variantID : nil
+        }
+        globalQuickModelAssignments[action] = QuickModelAssignment(
+            providerID: model.providerID,
+            modelID: model.modelID,
+            variant: validVariant
+        )
+        AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+        quickModelAssignmentsVersion &+= 1
+    }
+
+    /// Removes the model assigned to a quick action.
+    func clearQuickModelAssignment(for action: ModelQuickAction) {
+        globalQuickModelAssignments.removeValue(forKey: action)
+        AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+        quickModelAssignmentsVersion &+= 1
+    }
+
+    /// Updates only the reasoning variant for an existing quick action.
+    func updateQuickModelVariant(for action: ModelQuickAction, variantID: String?) {
+        guard var assignment = globalQuickModelAssignments[action] else { return }
+
+        if let variantID,
+           let model = availableModels.first(where: { $0.id == assignment.id }),
+           !model.variants.contains(where: { $0.id == variantID && $0.value.isThinkingEffortVariant }) {
+            assignment.variant = nil
+        } else {
+            assignment.variant = variantID
+        }
+
+        globalQuickModelAssignments[action] = assignment
+        AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+        quickModelAssignmentsVersion &+= 1
+    }
+
+    /// Activates the model assigned to a quick action, if it is available.
+    @discardableResult
+    func selectQuickModelAction(_ action: ModelQuickAction) -> Bool {
+        guard let assignment = quickModelAssignment(for: action),
+              let model = availableModels.first(where: { $0.id == assignment.id }) else {
+            return false
+        }
+
+        selectModel(model)
+        selectVariant(assignment.variant)
+        return true
+    }
+
+    /// Removes assignments that no longer resolve after a successful provider
+    /// refresh. A missing variant resets to Default while retaining its model.
+    private func synchronizeQuickModelAssignments() {
+        var didChange = false
+
+        for action in ModelQuickAction.allCases {
+            guard let assignment = globalQuickModelAssignments[action] else { continue }
+
+            guard let model = availableModels.first(where: { $0.id == assignment.id }) else {
+                globalQuickModelAssignments.removeValue(forKey: action)
+                didChange = true
+                continue
+            }
+
+            guard let variant = assignment.variant else { continue }
+            let isAvailable = model.variants.contains {
+                $0.id == variant && $0.value.isThinkingEffortVariant
+            }
+            guard !isAvailable else { continue }
+
+            var updatedAssignment = assignment
+            updatedAssignment.variant = nil
+            globalQuickModelAssignments[action] = updatedAssignment
+            didChange = true
+        }
+
+        if didChange {
+            AppPreferences.saveQuickModelAssignments(globalQuickModelAssignments)
+            quickModelAssignmentsVersion &+= 1
+        }
     }
 
     struct DefaultModelResolution: Equatable {
@@ -451,6 +599,7 @@ final class ChatClient: SSEEventHandlerDelegate {
         }
         displayedMessages = result
         timelineVersion &+= 1
+        scheduleTurnDiffLoads(for: result)
     }
 
     /// A foreground refresh can return an assistant message while the same
@@ -757,6 +906,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     /// restored before the worker callback validates membership.
     @ObservationIgnored private var finalizingAssistantMessages: [String: ChatMessage] = [:]
     @ObservationIgnored private var isReconcilingLiveAssistantMessages = false
+    @ObservationIgnored private var turnDiffTasksByAssistantID: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var resolvedTurnDiffAssistantIDs = Set<String>()
+    @ObservationIgnored private var turnFileDetailCache: [TurnFileDetailCacheKey: ReviewFileChange] = [:]
+    @ObservationIgnored private var turnFileDetailCacheOrder: [TurnFileDetailCacheKey] = []
 
     /// Interval between streaming buffer flushes (seconds).
     private static let flushInterval: TimeInterval = 0.04
@@ -784,6 +937,12 @@ final class ChatClient: SSEEventHandlerDelegate {
         label: "com.openlens.ChatClient.streaming-materialization",
         qos: .userInitiated
     )
+    private static let maximumTurnFileDetailCacheCount = 12
+
+    private struct TurnFileDetailCacheKey: Hashable {
+        let userMessageID: String
+        let path: String
+    }
 
     private func syncLiveActivityPendingUserResponse() {
         guard let liveActivityTracker else { return }
@@ -1086,7 +1245,9 @@ final class ChatClient: SSEEventHandlerDelegate {
         if providers.isEmpty {
             await loadProviders()
         }
+        guard !Task.isCancelled, currentSession?.id == session.id else { return }
         await loadMessages()
+        guard !Task.isCancelled, currentSession?.id == session.id else { return }
         await recoverPendingPermission()
         await recoverPendingQuestions()
     }
@@ -1096,7 +1257,14 @@ final class ChatClient: SSEEventHandlerDelegate {
 
         do {
             let loaded = try await messagesService!.loadMessages(sessionID: session.id)
-            let visibleMessages = mergeLoadedMessagesWithLocallyStoppedMessages(loaded)
+            guard !Task.isCancelled, currentSession?.id == session.id else { return }
+            let mergedMessages = mergeLoadedMessagesWithLocallyStoppedMessages(loaded)
+            let revert = currentSession?.id == session.id
+                ? currentSession?.revert
+                : session.revert
+            let visibleMessages = Self.messagesBeforeRevert(mergedMessages, revert: revert)
+            prepareTurnDiffRefresh(for: visibleMessages)
+            preserveTurnFileChanges(in: visibleMessages)
             self.messages = visibleMessages
             if Self.recentSessionModelSelection(from: visibleMessages) != nil {
                 syncSessionModelSelection(from: visibleMessages)
@@ -1106,12 +1274,98 @@ final class ChatClient: SSEEventHandlerDelegate {
             Logger.debug.info("messages count: \(visibleMessages.count)")
             self.contentVersion &+= 1
             self.scrollAnchor &+= 1
+        } catch is CancellationError {
+            return
         } catch {
+            guard currentSession?.id == session.id else { return }
             self.errorMessage = "Failed to load messages: \(error.localizedDescription)"
         }
 
         await refreshCurrentSessionStatus()
         await loadTodos()
+    }
+
+    func unloadSession(ifMatching sessionID: String) {
+        guard currentSession?.id == sessionID else { return }
+        resetSessionState()
+        currentSession = nil
+        inputText = ""
+    }
+
+    nonisolated static func messagesBeforeRevert(
+        _ messages: [ChatMessage],
+        revert: OCSessionRevert?
+    ) -> [ChatMessage] {
+        guard let revert else { return messages }
+        if let revertedIndex = messages.firstIndex(where: { $0.id == revert.messageID }) {
+            return Array(messages[..<revertedIndex])
+        }
+        return messages.filter { $0.id < revert.messageID }
+    }
+
+    /// Whether the current transcript can safely undo a persisted user turn.
+    /// OpenCode performs the actual revert, so this is intentionally unavailable
+    /// for locally simulated and read-only chat modes.
+    func canUndo(_ message: ChatMessage) -> Bool {
+        message.role == .user
+            && !isLoading
+            && !isQueueingPrompt
+            && !isUndoingMessage
+            && !isDemoMode
+            && !isRecordedReplayMode
+            && !isOfflinePreviewMode
+            && currentSession != nil
+            && messagesService != nil
+    }
+
+    /// Mirrors the TUI's Undo Message command by asking OpenCode to restore the
+    /// session state from immediately before the selected user message.
+    func undo(_ message: ChatMessage) async {
+        guard canUndo(message), let session = currentSession, let messagesService else { return }
+
+        isUndoingMessage = true
+        defer { isUndoingMessage = false }
+
+        do {
+            let revertedSession = try await messagesService.revertMessage(
+                sessionID: session.id,
+                messageID: message.id
+            )
+            guard currentSession?.id == session.id else { return }
+            currentSession = revertedSession ?? OCSession(
+                id: session.id,
+                projectID: session.projectID,
+                directory: session.directory,
+                parentID: session.parentID,
+                title: session.title,
+                version: session.version,
+                time: session.time,
+                share: session.share,
+                revert: OCSessionRevert(messageID: message.id)
+            )
+            await loadMessages()
+        } catch {
+            guard currentSession?.id == session.id else { return }
+            errorMessage = "Failed to undo message: \(error.localizedDescription)"
+        }
+    }
+
+    /// Invoked by `/undo` in the composer. OpenCode's TUI undo command targets
+    /// the most recent user turn, so the mobile command follows the same rule.
+    func undoLatestMessage() async {
+        guard let message = messages.reversed().first(where: { $0.role == .user }) else {
+            errorMessage = "There is no message to undo."
+            return
+        }
+
+        guard canUndo(message) else {
+            errorMessage = isRecordedReplayMode
+                ? AppText.recordedReplayReadOnly
+                : "Undo is not available right now."
+            return
+        }
+
+        await undo(message)
     }
 
     func refreshCurrentSessionStatus() async {
@@ -1200,6 +1454,144 @@ final class ChatClient: SSEEventHandlerDelegate {
         return result
     }
 
+    private func preserveTurnFileChanges(in loaded: [ChatMessage]) {
+        let existingByID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        for message in loaded {
+            guard let existing = existingByID[message.id], !existing.turnFileChanges.isEmpty else {
+                continue
+            }
+            message.setTurnFileChanges(existing.turnFileChanges)
+            resolvedTurnDiffAssistantIDs.insert(message.id)
+        }
+    }
+
+    private func prepareTurnDiffRefresh(for loaded: [ChatMessage]) {
+        for message in loaded where message.role == .assistant {
+            turnDiffTasksByAssistantID.removeValue(forKey: message.id)?.cancel()
+            resolvedTurnDiffAssistantIDs.remove(message.id)
+        }
+    }
+
+    private func scheduleTurnDiffLoads(for candidateMessages: [ChatMessage]) {
+        guard !isOfflinePreviewMode,
+              let sessionID = currentSession?.id,
+              messagesService != nil else {
+            return
+        }
+
+        for message in candidateMessages where message.role == .assistant && !message.isStreaming {
+            guard message.parentUserMessageID != nil,
+                  !resolvedTurnDiffAssistantIDs.contains(message.id),
+                  turnDiffTasksByAssistantID[message.id] == nil else {
+                continue
+            }
+
+            let assistantMessageID = message.id
+            turnDiffTasksByAssistantID[assistantMessageID] = Task { @MainActor [weak self, weak message] in
+                guard let self, let message else { return }
+                await self.loadTurnDiffSummary(for: message, sessionID: sessionID)
+            }
+        }
+    }
+
+    private func loadTurnDiffSummary(for message: ChatMessage, sessionID: String) async {
+        defer { turnDiffTasksByAssistantID.removeValue(forKey: message.id) }
+
+        guard let userMessageID = message.parentUserMessageID,
+              let messagesService else {
+            return
+        }
+
+        for attempt in 0..<2 {
+            do {
+                let files = try await messagesService.loadTurnFileChanges(
+                    sessionID: sessionID,
+                    userMessageID: userMessageID
+                )
+                guard !Task.isCancelled,
+                      currentSession?.id == sessionID,
+                      messages.contains(where: { $0 === message }) else {
+                    return
+                }
+
+                message.setTurnFileChanges(files.map(TurnFileChangeSummary.init(file:)))
+                resolvedTurnDiffAssistantIDs.insert(message.id)
+                if !files.isEmpty {
+                    timelineVersion &+= 1
+                    contentVersion &+= 1
+                }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                if attempt == 0 {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    guard !Task.isCancelled else { return }
+                    continue
+                }
+
+                resolvedTurnDiffAssistantIDs.insert(message.id)
+                Logger.chat.warning(
+                    "Failed to load turn diff for assistant message \(message.id, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    func loadTurnFileDetail(userMessageID: String, path: String) async throws -> ReviewFileChange {
+        let key = TurnFileDetailCacheKey(userMessageID: userMessageID, path: path)
+        if let cached = turnFileDetailCache[key] {
+            touchTurnFileDetailCacheKey(key)
+            return cached
+        }
+
+        guard let sessionID = currentSession?.id, let messagesService else {
+            throw OpenCodeError.notConnected
+        }
+
+        let files = try await messagesService.loadTurnFileChanges(
+            sessionID: sessionID,
+            userMessageID: userMessageID
+        )
+        guard currentSession?.id == sessionID,
+              let file = files.first(where: { $0.path == path }) else {
+            throw OpenCodeError.invalidPayload("This historical file diff is no longer available.")
+        }
+
+        cacheTurnFileDetail(file, for: key)
+        return file
+    }
+
+    /// Seeds the same lightweight summary and lazy detail cache used by live
+    /// turns so offline previews exercise the production presentation path.
+    func registerDemoTurnFileChanges(_ files: [ReviewFileChange], userMessageID: String) {
+        guard isDemoMode, let pendingAssistantMessage else { return }
+
+        pendingAssistantMessage.setParentUserMessageID(userMessageID)
+        pendingAssistantMessage.setTurnFileChanges(files.map(TurnFileChangeSummary.init(file:)))
+        for file in files {
+            cacheTurnFileDetail(
+                file,
+                for: TurnFileDetailCacheKey(userMessageID: userMessageID, path: file.path)
+            )
+        }
+    }
+
+    private func cacheTurnFileDetail(_ file: ReviewFileChange, for key: TurnFileDetailCacheKey) {
+        turnFileDetailCache[key] = file
+        touchTurnFileDetailCacheKey(key)
+
+        while turnFileDetailCacheOrder.count > Self.maximumTurnFileDetailCacheCount {
+            let oldest = turnFileDetailCacheOrder.removeFirst()
+            turnFileDetailCache.removeValue(forKey: oldest)
+        }
+    }
+
+    private func touchTurnFileDetailCacheKey(_ key: TurnFileDetailCacheKey) {
+        turnFileDetailCacheOrder.removeAll { $0 == key }
+        turnFileDetailCacheOrder.append(key)
+    }
+
     func loadTodos() async {
         guard let session = currentSession,
               let client = connection?.client else {
@@ -1261,7 +1653,11 @@ final class ChatClient: SSEEventHandlerDelegate {
     func loadProviders() async {
         guard !isOfflinePreviewMode else { return }
         isLoadingProviders = true
-        defer { isLoadingProviders = false }
+        var didLoadProvidersSuccessfully = false
+        defer {
+            isLoadingProviders = false
+            quickModelAssignmentsVersion &+= 1
+        }
 
         // Load config first — we need filter lists before selecting a model
         let configResult = await providersService!.loadConfig()
@@ -1281,6 +1677,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             let result = try await providersService!.loadProviders()
             self.providers = result.providers
             self.connectedProviderIDs = result.connectedProviderIDs
+            didLoadProvidersSuccessfully = true
             serverDefault = result.defaultProviderID.flatMap { providerID in
                 result.defaultModelID.map { (providerID: providerID, modelID: $0) }
             }
@@ -1330,6 +1727,10 @@ final class ChatClient: SSEEventHandlerDelegate {
                   !availableReasoningVariants.contains(where: { $0.id == selectedVariant }) {
             self.selectedVariant = nil
             persistCurrentSelection()
+        }
+
+        if didLoadProvidersSuccessfully {
+            synchronizeQuickModelAssignments()
         }
     }
 
@@ -1458,7 +1859,15 @@ final class ChatClient: SSEEventHandlerDelegate {
 
     func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isLoading, currentSession != nil else { return }
+        guard !text.isEmpty, !isLoading, !isQueueingPrompt, currentSession != nil else { return }
+
+        if Self.isUndoCommand(text) {
+            inputText = ""
+            Task {
+                await undoLatestMessage()
+            }
+            return
+        }
 
         if isDemoMode {
             beginResponse()
@@ -1502,6 +1911,99 @@ final class ChatClient: SSEEventHandlerDelegate {
         Task {
             await sendPromptAsync(text: text)
         }
+    }
+
+    /// Queues the current composer text after the running session turn. This
+    /// deliberately does not change response state or live activity: the
+    /// current turn remains in control until the server promotes the input.
+    func queuePrompt() {
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.isUndoCommand(text) {
+            errorMessage = "Wait for the active session to finish before undoing."
+            return
+        }
+        guard !text.isEmpty,
+              isLoading,
+              !isStoppingResponse,
+              !isQueueingPrompt,
+              pendingQuestion == nil,
+              canCompose,
+              currentSession != nil else {
+            return
+        }
+
+        let queuedPrompt = QueuedPrompt(text: text, state: isDemoMode ? .queued : .submitting)
+        inputText = ""
+        queuedPrompts.append(queuedPrompt)
+        contentVersion &+= 1
+        scrollAnchor &+= 1
+
+        if isDemoMode {
+            return
+        }
+
+        if isRecordedReplayMode {
+            queuedPrompts.removeAll { $0.id == queuedPrompt.id }
+            errorMessage = AppText.recordedReplayReadOnly
+            return
+        }
+
+        guard let session = currentSession,
+              let messagesService else {
+            queuedPrompts.removeAll { $0.id == queuedPrompt.id }
+            errorMessage = "Not connected."
+            return
+        }
+
+        isQueueingPrompt = true
+
+        Task {
+            defer {
+                if currentSession?.id == session.id {
+                    isQueueingPrompt = false
+                }
+            }
+
+            do {
+                try await messagesService.queuePrompt(sessionID: session.id, text: text)
+                guard currentSession?.id == session.id else { return }
+                acceptQueuedPrompt(id: queuedPrompt.id)
+            } catch {
+                guard currentSession?.id == session.id else { return }
+                queuedPrompts.removeAll { $0.id == queuedPrompt.id }
+                if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    inputText = text
+                }
+                errorMessage = "Failed to queue: \(error.localizedDescription)"
+                contentVersion &+= 1
+            }
+        }
+    }
+
+    private func acceptQueuedPrompt(id: UUID) {
+        guard let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return }
+        queuedPrompts[index].state = .queued
+
+        // The active turn can finish while the admission request is in flight.
+        // Promote immediately in that race; otherwise finishLoading() performs
+        // the transition at the next real turn boundary.
+        if !isLoading {
+            promoteNextQueuedPrompt()
+        }
+    }
+
+    private func promoteNextQueuedPrompt() {
+        guard queuedPrompts.first?.state == .queued else { return }
+        let prompt = queuedPrompts.removeFirst()
+        messages.append(
+            ChatMessage(
+                role: .user,
+                content: prompt.text,
+                createdAt: Date()
+            )
+        )
+        contentVersion &+= 1
+        scrollAnchor &+= 1
     }
 
     private func sendCommand(text: String, command: String, arguments: String) {
@@ -1601,6 +2103,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         case agent(agent: String, prompt: String)
     }
 
+    static func isUndoCommand(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "/undo"
+    }
+
     private func parseSlashAction(_ text: String) -> SlashAction? {
         guard text.hasPrefix("/") else { return nil }
 
@@ -1692,7 +2198,7 @@ final class ChatClient: SSEEventHandlerDelegate {
             let bufferedUpdates = detachBufferedStreamUpdates(for: pending.id)
             finalizePendingAssistantMessage(
                 pending,
-                appendsWhenEmpty: false,
+                appendsWhenEmpty: true,
                 bufferedUpdates: bufferedUpdates
             )
         }
@@ -2573,6 +3079,11 @@ final class ChatClient: SSEEventHandlerDelegate {
         abortTask = nil
         streamingFinalizationTokens.removeAll()
         finalizingAssistantMessages.removeAll()
+        turnDiffTasksByAssistantID.values.forEach { $0.cancel() }
+        turnDiffTasksByAssistantID.removeAll()
+        resolvedTurnDiffAssistantIDs.removeAll()
+        turnFileDetailCache.removeAll()
+        turnFileDetailCacheOrder.removeAll()
         cancelStoppedStateClear()
         ignoredAssistantMessageIDs.removeAll()
         locallyStoppedSessionID = nil
@@ -2582,6 +3093,8 @@ final class ChatClient: SSEEventHandlerDelegate {
         isRecordingStream = false
         connection?.sseClient?.setRawEventRetentionEnabled(false)
         isLoading = false
+        isQueueingPrompt = false
+        queuedPrompts = []
         responseState = .idle
         stopFlushTimer()
         cancelTimelineInvalidation()
@@ -2694,6 +3207,7 @@ final class ChatClient: SSEEventHandlerDelegate {
                 message.applyStreamingMaterialization(materialized)
                 message.isStreaming = false
                 self.clearStreamingFinalization(messageID: messageID)
+                self.scheduleTurnDiffLoads(for: [message])
                 self.contentVersion &+= 1
                 // The cached timeline switches its row kind from the live
                 // streaming projection to the finalized Markdown message.
@@ -2718,6 +3232,10 @@ final class ChatClient: SSEEventHandlerDelegate {
     // MARK: - Finish Loading
 
     func finishLoading() {
+        let completedActiveTurn = isLoading
+            || pendingAssistantMessage != nil
+            || responseState == .generating
+            || responseState == .stopping
         isLoading = false
         abortTask = nil
 
@@ -2750,6 +3268,10 @@ final class ChatClient: SSEEventHandlerDelegate {
         currentActivity = nil
         sessionStatus = nil
         markResponseIdleAfterFinish()
+
+        if completedActiveTurn {
+            promoteNextQueuedPrompt()
+        }
 
         contentVersion &+= 1
     }
@@ -2787,6 +3309,8 @@ private final class NoopLiveActivityProvider: LiveActivityProviding {
     ) {}
 
     func endActivity(completionSummary: String?) {}
+
+    func dismissImmediately() {}
 
     func previewLiveActivity() {}
 }

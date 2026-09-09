@@ -8,6 +8,7 @@ final class HapticController {
     // MARK: - Generators
 
     private let lightImpact = UIImpactFeedbackGenerator(style: .light)
+    private let selection = UISelectionFeedbackGenerator()
     private let notification = UINotificationFeedbackGenerator()
 
     /// Whether the first-response haptic has already fired for the current turn.
@@ -36,6 +37,18 @@ final class HapticController {
     func playStepCompletion() {
         guard AppPreferences.hapticsEnabled else { return }
         lightImpact.impactOccurred()
+    }
+
+    /// Prepare and fire selection feedback for discrete control changes.
+    func prepareForSelection() {
+        guard AppPreferences.hapticsEnabled else { return }
+        selection.prepare()
+    }
+
+    func playSelection() {
+        guard AppPreferences.hapticsEnabled else { return }
+        selection.selectionChanged()
+        selection.prepare()
     }
 
     /// Fire a warning notification (e.g. permission request).

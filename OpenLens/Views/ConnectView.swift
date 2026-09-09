@@ -22,6 +22,27 @@ func shouldAttemptAutoReconnect(
     return true
 }
 
+func connectionFailureMessage(
+    localNetworkAccessRequired: Bool,
+    connectionError: String?,
+    isAutoReconnect: Bool
+) -> String {
+    if localNetworkAccessRequired {
+        return AppText.localNetworkAccessRequiredBody
+    }
+
+    if let connectionError = connectionError?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .nilIfBlank
+    {
+        return connectionError
+    }
+
+    return isAutoReconnect
+        ? AppText.autoReconnectErrorBody
+        : AppText.manualConnectErrorBody
+}
+
 private enum ManualConnectionField: Hashable {
     case serverURL
     case username
@@ -854,14 +875,11 @@ struct ConnectView: View {
     }
 
     private var failureMessage: String {
-        if connection.localNetworkAccessRequired {
-            return AppText.localNetworkAccessRequiredBody
-        }
-        if isAutoReconnect {
-            return AppText.autoReconnectErrorBody
-        }
-        if let error = connectionError { return error }
-        return AppText.manualConnectErrorBody
+        connectionFailureMessage(
+            localNetworkAccessRequired: connection.localNetworkAccessRequired,
+            connectionError: connectionError,
+            isAutoReconnect: isAutoReconnect
+        )
     }
 
     // MARK: - Connection Actions

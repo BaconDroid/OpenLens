@@ -26,6 +26,11 @@ private struct ActivityIndicatorDot: View {
 /// Session list view with create, delete, and select.
 /// Uses SessionsService directly with view-local state.
 struct SessionsListView: View {
+    enum PresentationStyle: Equatable {
+        case navigation
+        case sidebar
+    }
+
     private struct NewSessionRequest: Identifiable {
         let id = UUID()
     }
@@ -72,15 +77,24 @@ struct SessionsListView: View {
     @State private var showDeleteConfirmation = false
     @State private var expandedProjectIDs = Set<String>()
 
+    let presentationStyle: PresentationStyle
+    let selectedSessionID: String?
     var onSelect: (OCSession) -> Void
+    var onDelete: (OCSession) -> Void
 
     @Environment(\.sessionsService) private var sessionsService
 
     init(
         initialState: InitialState,
-        onSelect: @escaping (OCSession) -> Void
+        presentationStyle: PresentationStyle = .navigation,
+        selectedSessionID: String? = nil,
+        onSelect: @escaping (OCSession) -> Void,
+        onDelete: @escaping (OCSession) -> Void = { _ in }
     ) {
+        self.presentationStyle = presentationStyle
+        self.selectedSessionID = selectedSessionID
         self.onSelect = onSelect
+        self.onDelete = onDelete
 
         switch initialState {
         case .loaded(let sessions):
@@ -104,6 +118,10 @@ struct SessionsListView: View {
     private var errorMessage: String? {
         if case .error(let msg) = viewState { return msg }
         return nil
+    }
+
+    private var isSidebar: Bool {
+        presentationStyle == .sidebar
     }
 
     private var groupedSessions: [SessionProjectGroup] {
@@ -136,36 +154,8 @@ struct SessionsListView: View {
     // MARK: - Body
 
     var body: some View {
-        Group {
-            if isLoading && sessions.isEmpty {
-                ProgressView()
-                    .tint(Color.appSecondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let errorMessage, sessions.isEmpty {
-                SessionsLoadErrorView(
-                    message: errorMessage,
-                    retry: retryLoadingSessions
-                )
-            } else if sessions.isEmpty {
-                emptyState
-            } else {
-                sessionList
-            }
-        }
-        .background(Color.appBackground)
-        .navigationBarTitleDisplayMode(.inline)
-        .navigationTitle(AppText.sessions)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    presentNewSessionSheet()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Color.appPrimary)
-                }
-            }
-        }
+        presentationContent
+        .background(isSidebar ? Color.clear : Color.appBackground)
         .sheet(item: $newSessionRequest) { _ in
             NewSessionSheet { session in
                 handleCreatedSession(session)
@@ -191,17 +181,60 @@ struct SessionsListView: View {
         }
     }
 
+    @ViewBuilder
+    private var presentationContent: some View {
+        if isSidebar {
+            VStack(spacing: 0) {
+                SessionsSidebarHeader(onCreate: presentNewSessionSheet)
+                sessionStateContent
+            }
+        } else {
+            sessionStateContent
+                .navigationBarTitleDisplayMode(.inline)
+                .navigationTitle(AppText.sessions)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            presentNewSessionSheet()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 16))
+                                .foregroundStyle(Color.appPrimary)
+                        }
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var sessionStateContent: some View {
+        if isLoading && sessions.isEmpty {
+            ProgressView()
+                .tint(Color.appSecondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let errorMessage, sessions.isEmpty {
+            SessionsLoadErrorView(
+                message: errorMessage,
+                retry: retryLoadingSessions
+            )
+        } else if sessions.isEmpty {
+            emptyState
+        } else {
+            sessionList
+        }
+    }
+
     // MARK: - Session List
 
     private var sessionList: some View {
         ScrollView {
-            LazyVStack(spacing: 18) {
+            LazyVStack(spacing: isSidebar ? 12 : 18) {
                 ForEach(groupedSessions) { group in
                     projectSection(group)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
+            .padding(.horizontal, isSidebar ? 12 : 24)
+            .padding(.top, isSidebar ? 10 : 16)
             .padding(.bottom, 16)
         }
         .refreshable {
@@ -222,7 +255,7 @@ struct SessionsListView: View {
                             .foregroundStyle(Color.appSecondary)
 
                         Text(group.title)
-                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                            .font(.system(size: isSidebar ? 15 : 18, weight: .semibold, design: .rounded))
                             .foregroundStyle(Color.appPrimary)
                             .lineLimit(1)
 
@@ -280,6 +313,7 @@ struct SessionsListView: View {
 
     private func sessionRow(_ session: OCSession) -> some View {
         let isBusy = sessionStatuses[session.id]?.type == .busy
+        let isSelected = isSidebar && selectedSessionID == session.id
 
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -317,12 +351,20 @@ struct SessionsListView: View {
 
             Spacer()
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 18, weight: .light))
-                .foregroundStyle(Color.appSecondary.opacity(0.7))
+            if !isSidebar {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 18, weight: .light))
+                    .foregroundStyle(Color.appSecondary.opacity(0.7))
+            }
         }
         .padding(.vertical, 12)
+        .padding(.horizontal, isSidebar ? 10 : 0)
+        .background(
+            isSelected ? Color.appTertiary : Color.clear,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
         .contentShape(Rectangle())
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
     // MARK: - Empty State
@@ -419,6 +461,7 @@ struct SessionsListView: View {
                 try await sessionsService.deleteSession(session)
                 sessions.removeAll { $0.id == session.id }
                 pruneExpandedProjects(using: sessions)
+                onDelete(session)
             } catch {
                 viewState = .error(error.localizedDescription)
             }
@@ -490,6 +533,34 @@ struct SessionsListView: View {
         let trimmedDirectory = session.directory?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmedDirectory, !trimmedDirectory.isEmpty else { return nil }
         return trimmedDirectory
+    }
+}
+
+private struct SessionsSidebarHeader: View {
+    let onCreate: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(AppText.sessions)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.appSecondary)
+
+            Spacer()
+
+            Button(action: onCreate) {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.appPrimary)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(AppText.newSession)
+        }
+        .padding(.leading, 22)
+        .padding(.trailing, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
     }
 }
 

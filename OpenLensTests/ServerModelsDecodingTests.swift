@@ -4,6 +4,19 @@ import Testing
 
 struct ServerModelsDecodingTests {
 
+    @MainActor
+    @Test func historyConversionRetainsAssistantParentMessageID() throws {
+        let payload = Data(
+            #"{"info":{"id":"assistant-1","sessionID":"session-1","role":"assistant","parentID":"user-1"},"parts":[]}"#.utf8
+        )
+        let serverMessage = try JSONDecoder().decode(OCMessageWithParts.self, from: payload)
+        let service = MessagesService(connection: ConnectionManager())
+
+        let message = service.convertToChatMessage(serverMessage)
+
+        #expect(message.parentUserMessageID == "user-1")
+    }
+
     @Test func ocPartTypeRemainsAlignedWithKnownUpstreamCases() {
         #expect(OCPartType(rawValue: "text") == .text)
         #expect(OCPartType(rawValue: "reasoning") == .reasoning)

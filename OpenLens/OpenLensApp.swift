@@ -7,6 +7,7 @@ private enum BuiltinChatPreview {
     case heavyLoad
     case concurrentSend
     case streamStress
+    case turnDiff
 
     var script: DemoScript {
         switch self {
@@ -20,6 +21,8 @@ private enum BuiltinChatPreview {
             return .concurrentSend
         case .streamStress:
             return .streamStress
+        case .turnDiff:
+            return .turnDiffPreview
         }
     }
 
@@ -35,6 +38,8 @@ private enum BuiltinChatPreview {
             return "chat-concurrent-send"
         case .streamStress:
             return "chat-stream-stress"
+        case .turnDiff:
+            return "chat-turn-diff"
         }
     }
 
@@ -50,6 +55,8 @@ private enum BuiltinChatPreview {
             return "concurrent-send"
         case .streamStress:
             return "stress"
+        case .turnDiff:
+            return "turn-diff"
         }
     }
 }
@@ -175,6 +182,8 @@ func shouldHandleConnectionAsFreshConnect(
 @main
 struct OpenLensApp: App {
     private static let streamStressLaunchArgument = "CHAT_STREAM_STRESS_MODE"
+    private static let queuedPromptPreviewLaunchArgument = "CHAT_QUEUE_PROMPT_PREVIEW_MODE"
+    private static let turnDiffPreviewLaunchArgument = "CHAT_TURN_DIFF_PREVIEW_MODE"
     private let screenshotModeEnabled: Bool
     private let streamStressModeEnabled: Bool
     @State private var connection: ConnectionManager
@@ -278,10 +287,17 @@ struct OpenLensApp: App {
 
     init() {
 #if DEBUG
-        let streamStressModeEnabled = ProcessInfo.processInfo.arguments.contains(
-            Self.streamStressLaunchArgument
+        let launchArguments = ProcessInfo.processInfo.arguments
+        let queuedPromptPreviewModeEnabled = launchArguments.contains(
+            Self.queuedPromptPreviewLaunchArgument
         )
+        let turnDiffPreviewModeEnabled = launchArguments.contains(Self.turnDiffPreviewLaunchArgument)
+        let streamStressModeEnabled = launchArguments.contains(Self.streamStressLaunchArgument)
+            || queuedPromptPreviewModeEnabled
+            || turnDiffPreviewModeEnabled
 #else
+        let queuedPromptPreviewModeEnabled = false
+        let turnDiffPreviewModeEnabled = false
         let streamStressModeEnabled = false
 #endif
         let screenshotModeEnabled = ScreenshotFixtures.isEnabled
@@ -293,9 +309,6 @@ struct OpenLensApp: App {
             )
         )
 
-//        if screenshotModeEnabled, let launchTab = ScreenshotFixtures.launchTab {
-//            router.selectedTab = launchTab
-//        }
 //        if screenshotModeEnabled, ScreenshotFixtures.opensDefaultChatSession {
 //            router.selectedTab = .chat
 //            router.chatPath = [.chatSession(session: ScreenshotFixtures.defaultSession)]
@@ -367,8 +380,14 @@ struct OpenLensApp: App {
             ))
         }
 
+        if screenshotModeEnabled, let launchTab = ScreenshotFixtures.launchTab {
+            router.selectedTab = launchTab
+        }
+
         if streamStressModeEnabled {
-            let preview = BuiltinChatPreview.streamStress
+            let preview = turnDiffPreviewModeEnabled
+                ? BuiltinChatPreview.turnDiff
+                : BuiltinChatPreview.streamStress
             let source = ChatPreviewSource.builtin(preview)
             let previewConnection = ConnectionManager()
             previewConnection.configureDemoState(
@@ -377,9 +396,36 @@ struct OpenLensApp: App {
             )
             self._activePreviewSource = State(initialValue: source)
             self._previewConnection = State(initialValue: previewConnection)
-            self._previewChatClient = State(
-                initialValue: ChatClient(demoMode: true, script: preview.script)
-            )
+            let previewClient = ChatClient(demoMode: true, script: preview.script)
+
+            if queuedPromptPreviewModeEnabled {
+                previewClient.currentSession = OCSession(
+                    id: "queued-prompt-preview",
+                    title: "Debug: Queued Prompt",
+                    time: OCSessionTime(created: 0, updated: 0)
+                )
+                previewClient.messages = [
+                    ChatMessage(
+                        role: .user,
+                        content: "Prepare the release checklist."
+                    )
+                ]
+                previewClient.pendingAssistantMessage = ChatMessage(
+                    role: .assistant,
+                    content: "I’m finishing the current response now…",
+                    isStreaming: true
+                )
+                previewClient.isLoading = true
+                previewClient.responseState = .generating
+                previewClient.queuedPrompts = [
+                    QueuedPrompt(
+                        text: "Run the tests after this finishes.",
+                        state: .queued
+                    )
+                ]
+            }
+
+            self._previewChatClient = State(initialValue: previewClient)
         }
     }
 
@@ -444,29 +490,29 @@ struct OpenLensApp: App {
             .task(id: connection.state) {
                 await prepareInitialSessions(for: connection.state)
             }
-//            .sheet(isPresented: previewPresentationBinding) {
-//                if let previewClient = previewChatClient, let previewConn = previewConnection {
-//                    NavigationStack {
-//                        ChatView(chatClient: previewClient)
-//                            .environment(\.connection, previewConn)
-//                            .toolbar {
-//                                ToolbarItem(placement: .topBarLeading) {
-//                                    Button {
-//                                        exitPreview()
-//                                    } label: {
-//                                        Image(systemName: "xmark")
-//                                    }
-//                                }
-//                            }
-//                    }
-//                    .interactiveDismissDisabled(true)
-//                    .onChange(of: previewConn.state) { _, newState in
-//                        if case .disconnected = newState {
-//                            exitPreview()
-//                        }
-//                    }
-//                }
-//            }
+            .sheet(isPresented: previewPresentationBinding) {
+                if let previewClient = previewChatClient, let previewConn = previewConnection {
+                    NavigationStack {
+                        ChatView(chatClient: previewClient)
+                            .environment(\.connection, previewConn)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button {
+                                        exitPreview()
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                }
+                            }
+                    }
+                    .interactiveDismissDisabled(true)
+                    .onChange(of: previewConn.state) { _, newState in
+                        if case .disconnected = newState {
+                            exitPreview()
+                        }
+                    }
+                }
+            }
 //            .sheet(isPresented: $showReviewPrePrompt) {
 //                ReviewRequestSheet(
 //                    onReview: {
@@ -513,6 +559,7 @@ struct OpenLensApp: App {
             ) {
                 Button(AppText.switchAction, role: .destructive) {
                     if isPreviewMode { exitPreview() }
+                    liveActivity.dismissImmediately()
                     connection.disconnect()
                     // pendingDeepLink is already set — ConnectView will pick it up
                 }

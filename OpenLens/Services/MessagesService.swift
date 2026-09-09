@@ -39,6 +39,15 @@ final class MessagesService {
         try await client.sendPromptAsync(sessionID: sessionID, text: text, model: model, agent: agent, variant: variant)
     }
 
+    /// Queue a follow-up behind the active session turn.
+    func queuePrompt(sessionID: String, text: String) async throws {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+
+        try await client.queuePrompt(sessionID: sessionID, text: text)
+    }
+
     func sendCommand(
         sessionID: String,
         command: String,
@@ -72,6 +81,35 @@ final class MessagesService {
         let _ = try await client.abortSession(id: sessionID)
     }
 
+    // MARK: - Turn Diffs
+
+    func loadTurnFileChanges(sessionID: String, userMessageID: String) async throws -> [ReviewFileChange] {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+
+        return try await client.getSessionDiff(sessionID: sessionID, messageID: userMessageID)
+            .map(ReviewFileChange.init(diff:))
+            .sorted { lhs, rhs in
+                lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+            }
+    }
+
+    // MARK: - Undo
+
+    /// Reverts a user message and the work that followed it, restoring the
+    /// session to the state immediately before that message.
+    func revertMessage(sessionID: String, messageID: String) async throws -> OCSession? {
+        guard let client = connection.client else {
+            throw OpenCodeError.notConnected
+        }
+
+        return try await client.revertMessage(
+            sessionID: sessionID,
+            messageID: messageID
+        )
+    }
+
     // MARK: - Conversion
 
     /// Convert a server message (with parts) to the local ChatMessage model.
@@ -93,7 +131,8 @@ final class MessagesService {
             tokens: msg.info.tokens,
             modelID: resolvedModelID,
             providerID: resolvedProviderID,
-            finish: msg.info.finish
+            finish: msg.info.finish,
+            parentUserMessageID: msg.info.parentID
         )
     }
 }

@@ -53,6 +53,9 @@ enum DemoEvent {
     /// Finish the assistant turn (commits pending message, clears activity).
     case finish
 
+    /// Attach the exact file changes produced by the current user/assistant turn.
+    case turnFileChanges([ReviewFileChange])
+
     /// Pause for a duration (seconds).
     case pause(TimeInterval)
 }
@@ -93,6 +96,7 @@ final class DemoPlayer {
 
     private func run(_ script: DemoScript) async {
         guard let client = chatClient else { return }
+        var lastUserMessageID: String?
 
         for (eventIndex, event) in script.events.enumerated() {
             guard !Task.isCancelled else { return }
@@ -104,6 +108,7 @@ final class DemoPlayer {
             case .userMessage(let text):
                 let msg = ChatMessage(role: .user, content: text)
                 client.messages.append(msg)
+                lastUserMessageID = msg.id
                 client.scrollAnchor &+= 1
 
             case .seedHistory(let messageCount):
@@ -124,7 +129,8 @@ final class DemoPlayer {
                     content: "",
                     isStreaming: true,
                     modelID: "claude-sonnet-4-20250514",
-                    providerID: "anthropic"
+                    providerID: "anthropic",
+                    parentUserMessageID: lastUserMessageID
                 )
                 client.pendingAssistantMessage = msg
                 client.isLoading = true
@@ -273,6 +279,10 @@ final class DemoPlayer {
             case .finish:
                 client.finishLoading()
 
+            case .turnFileChanges(let files):
+                guard let userMessageID = lastUserMessageID else { continue }
+                client.registerDemoTurnFileChanges(files, userMessageID: userMessageID)
+
             case .pause(let duration):
                 try? await Task.sleep(for: .seconds(duration))
             }
@@ -405,6 +415,81 @@ final class DemoPlayer {
 // MARK: - Built-in Demo Scripts
 
 extension DemoScript {
+
+    static let turnDiffPreview = DemoScript(
+        sessionTitle: "Preview: Turn File Changes",
+        events: [
+            .userMessage("Add per-turn file change summaries to completed assistant responses."),
+            .assistantStart,
+            .streamText("Implemented the per-turn summary and a read-only historical diff sheet.", chunkSize: 120, delay: 0),
+            .turnFileChanges([
+                ReviewFileChange(
+                    path: "OpenLens/Views/Components/TurnFileChangesView.swift",
+                    status: "A",
+                    additions: 42,
+                    deletions: 0,
+                    beforeText: nil,
+                    afterText: """
+                    import SwiftUI
+
+                    struct TurnFileChangesTimelineRow: View {
+                        let files: [TurnFileChangeSummary]
+
+                        var body: some View {
+                            ForEach(files) { file in
+                                Text(file.filename)
+                            }
+                        }
+                    }
+                    """,
+                    patchHunks: [
+                        ReviewFilePatchHunk(
+                            oldStart: 0,
+                            oldLines: 0,
+                            newStart: 1,
+                            newLines: 12,
+                            lines: [
+                                "+import SwiftUI",
+                                "+",
+                                "+struct TurnFileChangesTimelineRow: View {",
+                                "+    let files: [TurnFileChangeSummary]",
+                                "+",
+                                "+    var body: some View {",
+                                "+        ForEach(files) { file in",
+                                "+            Text(file.filename)",
+                                "+        }",
+                                "+    }",
+                                "+}",
+                            ]
+                        )
+                    ]
+                ),
+                ReviewFileChange(
+                    path: "OpenLens/Services/ChatClient.swift",
+                    status: "M",
+                    additions: 31,
+                    deletions: 4,
+                    beforeText: "func finishLoading() {\n    isLoading = false\n}",
+                    afterText: "func finishLoading() {\n    isLoading = false\n    loadTurnDiffSummary()\n}",
+                    patchHunks: [
+                        ReviewFilePatchHunk(
+                            oldStart: 1,
+                            oldLines: 3,
+                            newStart: 1,
+                            newLines: 4,
+                            lines: [
+                                " func finishLoading() {",
+                                "     isLoading = false",
+                                "+    loadTurnDiffSummary()",
+                                " }",
+                            ]
+                        )
+                    ]
+                ),
+            ]),
+            .finish,
+        ]
+    )
 
     private static let debugBaselineLongParagraph = Array(
         repeating: "The chat should keep feeling continuous even while new deltas arrive, the message bubble grows, tool rows appear, and the renderer eventually swaps the lightweight streaming text for a fully parsed markdown view.",
